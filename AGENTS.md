@@ -16,7 +16,7 @@ defaults, comments, tests, docs, or git history. Use placeholders: `http://192.0
 - `ensure_borderless_window_policy` subclasses the HWND every frame, strips caption/sysmenu styles, keeps `WS_THICKFRAME` for vertical resizing, and re-applies `DWMNCRP_DISABLED`. Do not replace it with a one-shot DWM call.
 - Tray mouse-down hides an open flyout and suppresses the matching mouse-up so it does not bounce back open.
 - Every successful dispatch starts the Android-style settle cascade (`schedule_settle`): refresh all group states at +0.5/1/3/8 s, last action wins.
-- Device cards are collapsed by default (`DevicesView::expanded`). Collapsed cards render their first numeric/enum/string control on a second line; a first legacy action renders inline in the header between the title and the switch/chevron.
+- Device cards are square tiles in a two-column grid. A toggle-only tile is a whole-card switch; toggle+slider tiles use a radial power button plus card-body slider; `has_more` adds the right disclosure strip. Expanded cards are full width and close on outside click.
 - Device order is saved by path in `Settings::device_order`; new paths append, and missing paths/state are retained so devices return to their slot after transient schema omissions or re-additions.
 - UI sound effects go through `sound::play` only when `Settings::ui_sounds` is enabled.
 - Use `ui::button::pill_button` for custom buttons; do not use explicit `.fill()` on `egui::Button` or hover feedback is lost.

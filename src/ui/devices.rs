@@ -1,15 +1,14 @@
-//! Scrollable device cards: collapsible groups with toggle, sliders, steppers,
-//! enum pills/dropdown, strings, status readouts, and action tiles.
+//! Square device tiles plus a full-width expanded card for every option.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     sync::Arc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use eframe::egui::{
-    self, Align, Color32, ColorImage, CornerRadius, Layout, Margin, RichText, Sense, Stroke,
-    TextureHandle, TextureOptions, Ui, vec2,
+    self, Align2, Color32, ColorImage, CornerRadius, FontId, Margin, Rect, RichText, Sense, Stroke,
+    TextureHandle, TextureOptions, Ui, pos2, vec2,
 };
 use serde_json::{Value, json};
 
@@ -28,13 +27,13 @@ use crate::{
     theme::{border_subtle, hover_overlay},
 };
 
-/// Enums with at most this many options render as segmented pills.
 const PILL_MAX_OPTIONS: usize = 4;
-/// Shared label column so every control row lines up.
 const LABEL_WIDTH: f32 = 92.0;
-/// Fixed numeric readout column keeps all slider tracks the same length.
 const VALUE_WIDTH: f32 = 46.0;
 const ROW_GAP: f32 = 8.0;
+const TILE_GAP: f32 = 8.0;
+const TILE_STRIP_WIDTH: f32 = 26.0;
+const CLICK_AWAY_GRACE: Duration = Duration::from_millis(150);
 
 struct PendingNumeric {
     value: f64,
@@ -47,13 +46,12 @@ struct PendingNumeric {
 
 #[derive(Default)]
 pub struct DevicesView {
-    /// Cached GPU textures keyed by group path + `Arc::as_ptr` fingerprint so
-    /// cache clears or fresh icons reload automatically.
     textures: HashMap<String, (usize, Option<TextureHandle>)>,
     pending: HashMap<(String, String), PendingNumeric>,
     string_edits: HashMap<(String, String), String>,
-    /// Device cards the user has expanded (session-local; collapsed by default).
-    expanded: HashSet<String>,
+    /// At most one tile is expanded; expansion renders full width in place.
+    expanded: Option<String>,
+    expanded_at: Option<Instant>,
 }
 
 fn decode_png(bytes: &[u8]) -> Result<ColorImage, ApiError> {
@@ -62,6 +60,12 @@ fn decode_png(bytes: &[u8]) -> Result<ColorImage, ApiError> {
         .to_rgba8();
     let size = [img.width() as usize, img.height() as usize];
     Ok(ColorImage::from_rgba_unmultiplied(size, img.as_raw()))
+}
+
+fn play(shared: &Shared, effect: UiSound) {
+    if shared.settings().ui_sounds {
+        sound::play(effect);
+    }
 }
 
 fn switch(ui: &mut Ui, on: bool, busy: bool) -> bool {
@@ -85,7 +89,7 @@ fn switch(ui: &mut Ui, on: bool, busy: bool) -> bool {
         track = track.gamma_multiply(0.82);
     }
     ui.painter().rect_filled(rect, 12.0, track);
-    if !on {
+    if !on || hovered {
         ui.painter().rect_stroke(
             rect,
             12.0,
@@ -97,13 +101,6 @@ fn switch(ui: &mut Ui, on: bool, busy: bool) -> bool {
                     PALETTE.outline
                 },
             ),
-            egui::StrokeKind::Inside,
-        );
-    } else if hovered {
-        ui.painter().rect_stroke(
-            rect,
-            12.0,
-            Stroke::new(1.0, PALETTE.focus),
             egui::StrokeKind::Inside,
         );
     }
@@ -120,12 +117,6 @@ fn switch(ui: &mut Ui, on: bool, busy: bool) -> bool {
         ui.ctx().request_repaint();
     }
     resp.clicked()
-}
-
-fn play(shared: &Shared, effect: UiSound) {
-    if shared.settings().ui_sounds {
-        sound::play(effect);
-    }
 }
 
 fn move_button(ui: &mut Ui, up: bool) -> bool {
@@ -165,7 +156,7 @@ fn chevron_button(ui: &mut Ui, expanded: bool) -> bool {
 fn control_label(ui: &mut Ui, text: &str) {
     ui.allocate_ui_with_layout(
         vec2(LABEL_WIDTH, 22.0),
-        Layout::left_to_right(Align::Center),
+        egui::Layout::left_to_right(egui::Align::Center),
         |ui| {
             ui.add(
                 egui::Label::new(
@@ -183,7 +174,7 @@ fn control_label(ui: &mut Ui, text: &str) {
 fn value_chip(ui: &mut Ui, text: &str) {
     ui.allocate_ui_with_layout(
         vec2(VALUE_WIDTH, 22.0),
-        Layout::right_to_left(Align::Center),
+        egui::Layout::right_to_left(egui::Align::Center),
         |ui| {
             ui.add(
                 egui::Label::new(
@@ -255,22 +246,52 @@ fn json_numeric(value: f64, is_int: bool) -> Value {
     }
 }
 
+fn fit_text(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_owned();
+    }
+    let mut out: String = text.chars().take(max_chars.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+fn first_slider(group: &DeviceGroup) -> Option<&RangeParam> {
+    group
+        .set
+        .as_ref()?
+        .range_params
+        .iter()
+        .find(|param| param.has_slider())
+}
+
+fn surface_count(group: &DeviceGroup) -> usize {
+    let mut count = group.legacy.len();
+    if let Some(set) = &group.set {
+        if set.toggle_param.is_some() {
+            count += 1;
+        }
+        count += set.range_params.len() + set.enum_params.len() + set.string_params.len();
+    }
+    count
+}
+
+fn has_more(group: &DeviceGroup) -> bool {
+    let surfaces = surface_count(group);
+    let has_primary = group.set.as_ref().is_some_and(|set| {
+        set.toggle_param.is_some() || set.range_params.iter().any(RangeParam::has_slider)
+    }) || (surfaces == 1 && group.legacy.len() == 1);
+    surfaces > 1 || !group.readouts.is_empty() || (!has_primary && surfaces > 0)
+}
+
 impl DevicesView {
-    /// Flush any debounced slider/stepper edits immediately (e.g. before hiding the flyout).
+    pub fn collapse_expanded(&mut self) {
+        self.expanded = None;
+    }
+
     pub fn flush_all(&mut self, shared: &Shared, poller: &Poller) {
         let keys: Vec<_> = self.pending.keys().cloned().collect();
         for key in keys {
-            if let Some(p) = self.pending.remove(&key) {
-                let value = json_numeric(p.value, p.is_int);
-                poller.set_param(
-                    shared,
-                    &p.group,
-                    &p.action_path,
-                    &p.required_inputs,
-                    &key.1,
-                    value,
-                );
-            }
+            self.flush_key(&key, shared, poller);
         }
     }
 
@@ -285,13 +306,94 @@ impl DevicesView {
             ui.label(RichText::new(msg).color(PALETTE.on_surface_variant));
             return;
         }
-        for (index, group) in snap.catalog.iter().enumerate() {
-            if index > 0 {
-                ui.add_space(6.0);
+
+        let tile_w = ((ui.available_width() - TILE_GAP) / 2.0).floor().max(120.0);
+        // Rows are spaced explicitly; egui's inherited vertical item spacing
+        // would otherwise add a trailing gap under the last row.
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let mut row: Vec<&DeviceGroup> = Vec::with_capacity(2);
+        let mut expanded_rect = None;
+        let mut expand_request = None;
+        let mut collapse_request = false;
+        let mut needs_gap = false;
+
+        for group in snap.catalog.iter() {
+            if self.expanded.as_deref() == Some(group.path.as_str()) {
+                if !row.is_empty() {
+                    if needs_gap {
+                        ui.add_space(TILE_GAP);
+                    }
+                    self.tile_row(ui, &row, snap, shared, poller, tile_w, &mut expand_request);
+                    row.clear();
+                    needs_gap = true;
+                }
+                if needs_gap {
+                    ui.add_space(TILE_GAP);
+                }
+                let response =
+                    self.expanded_card(ui, group, snap, shared, poller, &mut collapse_request);
+                expanded_rect = Some(response);
+                needs_gap = true;
+            } else {
+                row.push(group);
+                if row.len() == 2 {
+                    if needs_gap {
+                        ui.add_space(TILE_GAP);
+                    }
+                    self.tile_row(ui, &row, snap, shared, poller, tile_w, &mut expand_request);
+                    row.clear();
+                    needs_gap = true;
+                }
             }
-            self.card(ui, group, snap, shared, poller);
         }
+        if !row.is_empty() {
+            if needs_gap {
+                ui.add_space(TILE_GAP);
+            }
+            self.tile_row(ui, &row, snap, shared, poller, tile_w, &mut expand_request);
+        }
+
+        let now = Instant::now();
+        if let Some(path) = expand_request {
+            play(shared, UiSound::Open);
+            self.expanded = Some(path);
+            self.expanded_at = Some(now);
+        } else if collapse_request {
+            play(shared, UiSound::Close);
+            self.expanded = None;
+        } else if let Some(rect) = expanded_rect
+            && self
+                .expanded_at
+                .is_none_or(|t| now.duration_since(t) >= CLICK_AWAY_GRACE)
+        {
+            let clicked = ui.input(|input| input.pointer.any_click());
+            let position = ui.input(|input| input.pointer.interact_pos());
+            if clicked && position.is_some_and(|position| !rect.contains(position)) {
+                play(shared, UiSound::Close);
+                self.expanded = None;
+            }
+        }
+
         self.flush_due(ui.ctx(), shared, poller);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn tile_row(
+        &mut self,
+        ui: &mut Ui,
+        row: &[&DeviceGroup],
+        snap: &Snapshot,
+        shared: &Arc<Shared>,
+        poller: &Poller,
+        tile_w: f32,
+        expand_request: &mut Option<String>,
+    ) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = TILE_GAP;
+            for group in row {
+                self.tile(ui, group, snap, shared, poller, tile_w, expand_request);
+            }
+        });
     }
 
     fn texture_for(
@@ -317,34 +419,385 @@ impl DevicesView {
         }
         self.textures
             .get(key)
-            .and_then(|(_, t)| t.as_ref())
+            .and_then(|(_, tex)| tex.as_ref())
             .map(TextureHandle::id)
     }
 
-    fn card(
+    #[allow(clippy::too_many_arguments)]
+    fn tile(
         &mut self,
         ui: &mut Ui,
         group: &DeviceGroup,
         snap: &Snapshot,
         shared: &Arc<Shared>,
         poller: &Poller,
+        tile_w: f32,
+        expand_request: &mut Option<String>,
     ) {
         let state = snap.states.get(&group.path);
-        let tex = self.texture_for(ui.ctx(), snap, &group.path);
-        let expanded = self.expanded.contains(&group.path);
-        let header_action = if !expanded
-            && group.set.as_ref().is_none_or(|set| {
-                set.range_params.is_empty()
-                    && set.enum_params.is_empty()
-                    && set.string_params.is_empty()
-            }) {
-            group.legacy.first()
-        } else {
-            None
-        };
-        let mut toggle_collapse = false;
+        let texture = self.texture_for(ui.ctx(), snap, &group.path);
+        let toggle = group
+            .set
+            .as_ref()
+            .and_then(|set| set.toggle_param.as_deref());
+        let slider = first_slider(group);
+        let primary_action = (toggle.is_none() && slider.is_none() && group.legacy.len() == 1)
+            .then(|| group.legacy.first())
+            .flatten();
+        let more = has_more(group);
+        let on = toggle
+            .and_then(|name| state.and_then(|s| s.get(name)))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
 
-        egui::Frame::new()
+        let (rect, _) = ui.allocate_exact_size(vec2(tile_w, tile_w), Sense::hover());
+        let id = ui.scope_id().with(("device-tile", &group.path));
+        let strip_rect = more.then(|| {
+            Rect::from_min_max(
+                pos2(rect.right() - TILE_STRIP_WIDTH, rect.top() + 1.0),
+                pos2(rect.right() - 1.0, rect.bottom() - 1.0),
+            )
+        });
+        let body_right = strip_rect.map_or(rect.right() - 1.0, |strip| strip.left() - 1.0);
+        let body_rect = Rect::from_min_max(
+            rect.min + vec2(1.0, 1.0),
+            pos2(body_right, rect.bottom() - 1.0),
+        );
+        let body_sense = if slider.is_some() {
+            Sense::click_and_drag()
+        } else {
+            Sense::click()
+        };
+        let body = ui.interact(body_rect, id.with("body"), body_sense);
+        let strip =
+            strip_rect.map(|strip_rect| ui.interact(strip_rect, id.with("more"), Sense::click()));
+        let radial_rect = (toggle.is_some() && slider.is_some()).then(|| {
+            Rect::from_center_size(
+                pos2(body_rect.right() - 18.0, body_rect.top() + 18.0),
+                vec2(28.0, 28.0),
+            )
+        });
+        let radial = radial_rect
+            .map(|radial_rect| ui.interact(radial_rect, id.with("power"), Sense::click()));
+
+        let strip_hovered = strip.as_ref().is_some_and(|response| response.hovered());
+        let radial_hovered = radial.as_ref().is_some_and(|response| response.hovered());
+        if body.hovered() || strip_hovered || radial_hovered {
+            ui.ctx()
+                .set_cursor_icon(if slider.is_some() && body.hovered() {
+                    egui::CursorIcon::ResizeHorizontal
+                } else {
+                    egui::CursorIcon::PointingHand
+                });
+        }
+
+        let painter = ui.painter();
+        let mut bg = if on {
+            PALETTE
+                .surface_container
+                .blend(PALETTE.primary.gamma_multiply(0.22))
+        } else {
+            PALETTE.surface_container
+        };
+        if body.hovered() || strip_hovered || radial_hovered {
+            bg = bg.blend(hover_overlay());
+        }
+        if body.is_pointer_button_down_on() {
+            bg = bg.gamma_multiply(0.90);
+        }
+        painter.rect_filled(rect, CornerRadius::same(CARD_RADIUS), bg);
+        painter.rect_stroke(
+            rect,
+            CornerRadius::same(CARD_RADIUS),
+            Stroke::new(
+                1.0,
+                if body.hovered() || strip_hovered || radial_hovered {
+                    PALETTE.focus.gamma_multiply(0.7)
+                } else {
+                    border_subtle()
+                },
+            ),
+            egui::StrokeKind::Inside,
+        );
+        if strip_hovered && let Some(strip_rect) = strip_rect {
+            painter.rect_filled(
+                strip_rect.shrink2(vec2(0.0, 1.0)),
+                CornerRadius {
+                    nw: 0,
+                    ne: CARD_RADIUS,
+                    sw: 0,
+                    se: CARD_RADIUS,
+                },
+                hover_overlay(),
+            );
+            painter.line_segment(
+                [strip_rect.left_top(), strip_rect.left_bottom()],
+                Stroke::new(1.0, border_subtle()),
+            );
+        }
+
+        let inner = body_rect.shrink(10.0);
+        let icon_rect = Rect::from_min_size(inner.min, vec2(26.0, 26.0));
+        if let Some(texture) = texture {
+            painter.image(
+                texture,
+                icon_rect,
+                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        } else {
+            icons::draw_kind(painter, group.icon, icon_rect.shrink(1.0), PALETTE.focus);
+        }
+
+        let text_x = inner.left() + 34.0;
+        let text_right = radial_rect.map_or(body_rect.right() - 8.0, |radial| radial.left() - 4.0);
+        let max_chars = (((text_right - text_x) / 7.0).floor() as usize).max(6);
+        painter.text(
+            pos2(text_x, inner.top()),
+            Align2::LEFT_TOP,
+            fit_text(&group.title, max_chars),
+            FontId::proportional(12.5),
+            Color32::WHITE,
+        );
+        if let Some(subtitle) = &group.subtitle {
+            painter.text(
+                pos2(text_x, inner.top() + 16.0),
+                Align2::LEFT_TOP,
+                fit_text(subtitle, max_chars + 4),
+                FontId::proportional(9.5),
+                PALETTE.muted,
+            );
+        }
+
+        let mut value_text = None;
+        let mut value_label = None;
+        if let Some(param) = slider {
+            let value = value_f64(state, &param.name, param.default_value())
+                .clamp(param.min.unwrap(), param.max.unwrap());
+            let fraction = ((value - param.min.unwrap())
+                / (param.max.unwrap() - param.min.unwrap()))
+            .clamp(0.0, 1.0) as f32;
+            let track = Rect::from_min_max(
+                pos2(inner.left(), rect.bottom() - 16.0),
+                pos2(inner.right(), rect.bottom() - 10.0),
+            );
+            painter.rect_filled(track, 3.0, PALETTE.track);
+            if fraction > 0.0 {
+                painter.rect_filled(
+                    Rect::from_min_max(
+                        track.left_top(),
+                        pos2(track.left() + track.width() * fraction, track.bottom()),
+                    ),
+                    3.0,
+                    PALETTE.primary,
+                );
+            }
+            value_label = Some(prettify(&param.name));
+            value_text = Some(format_number(value, param.is_int));
+        } else if let Some(toggle) = toggle {
+            value_label = Some(prettify(toggle));
+            value_text = Some(if on { "On".into() } else { "Off".into() });
+        } else if let Some(action) = primary_action {
+            value_label = Some(action.label.clone());
+        } else if let Some(readout) = group.readouts.first()
+            && let Some(field) = readout.fields.first()
+        {
+            let value = state
+                .and_then(|s| s.get(&field.name))
+                .map(|value| format_readout_value(value, field.kind))
+                .unwrap_or_else(|| "—".into());
+            value_label = Some(prettify(&field.name));
+            value_text = Some(value);
+        }
+        if let Some(label) = value_label {
+            painter.text(
+                pos2(inner.left(), rect.bottom() - 37.0),
+                Align2::LEFT_TOP,
+                fit_text(&label, 20),
+                FontId::proportional(9.5),
+                PALETTE.muted,
+            );
+        }
+        if let Some(value) = value_text {
+            painter.text(
+                pos2(inner.left(), rect.bottom() - 28.0),
+                Align2::LEFT_TOP,
+                value,
+                FontId::proportional(17.0),
+                Color32::WHITE,
+            );
+        }
+
+        if let Some(radial_rect) = radial_rect {
+            let value = on;
+            painter.circle_filled(
+                radial_rect.center(),
+                13.0,
+                if value {
+                    PALETTE.primary
+                } else {
+                    PALETTE.surface_container_high
+                },
+            );
+            painter.circle_stroke(
+                radial_rect.center(),
+                13.0,
+                Stroke::new(
+                    if radial_hovered { 1.5 } else { 1.0 },
+                    if radial_hovered || value {
+                        PALETTE.focus
+                    } else {
+                        PALETTE.outline
+                    },
+                ),
+            );
+            icons::power(
+                painter,
+                radial_rect.shrink(8.0),
+                if value {
+                    Color32::WHITE
+                } else {
+                    PALETTE.on_surface_variant
+                },
+            );
+        }
+
+        if let Some(strip_rect) = strip_rect {
+            let color = if strip_hovered {
+                Color32::WHITE
+            } else {
+                PALETTE.on_surface_variant
+            };
+            icons::chevron(
+                painter,
+                Rect::from_center_size(
+                    pos2(strip_rect.center().x, strip_rect.top() + 16.0),
+                    vec2(12.0, 12.0),
+                ),
+                color,
+                false,
+            );
+        }
+
+        let over_radial = radial
+            .as_ref()
+            .is_some_and(|response| response.clicked() || response.hovered());
+        if let Some(strip) = strip
+            && strip.clicked()
+        {
+            *expand_request = Some(group.path.clone());
+        }
+        if let Some(radial) = radial
+            && radial.clicked()
+            && let Some(set) = &group.set
+            && let Some(toggle) = &set.toggle_param
+        {
+            play(shared, UiSound::Toggle);
+            poller.set_param(
+                shared,
+                &group.path,
+                &set.action_path,
+                &set.required_inputs,
+                toggle,
+                json!(!on),
+            );
+        }
+
+        if let Some(param) = slider {
+            if !over_radial && (body.dragged() || body.clicked()) {
+                if let Some(position) = body.interact_pointer_pos() {
+                    let fraction =
+                        ((position.x - inner.left()) / inner.width()).clamp(0.0, 1.0) as f64;
+                    let value =
+                        param.min.unwrap() + fraction * (param.max.unwrap() - param.min.unwrap());
+                    let key = self.queue_numeric(
+                        group,
+                        group.set.as_ref().unwrap(),
+                        param,
+                        value,
+                        shared,
+                    );
+                    if body.drag_stopped() || body.clicked() {
+                        self.flush_key(&key, shared, poller);
+                        play(shared, UiSound::Action);
+                    }
+                }
+            } else if !over_radial && body.drag_stopped() {
+                let key = (
+                    group.set.as_ref().unwrap().action_path.clone(),
+                    param.name.clone(),
+                );
+                self.flush_key(&key, shared, poller);
+                play(shared, UiSound::Action);
+            }
+        } else if !over_radial && body.clicked() {
+            if let (Some(set), Some(toggle)) = (&group.set, toggle) {
+                play(shared, UiSound::Toggle);
+                poller.set_param(
+                    shared,
+                    &group.path,
+                    &set.action_path,
+                    &set.required_inputs,
+                    toggle,
+                    json!(!on),
+                );
+            } else if let Some(action) = primary_action {
+                play(shared, UiSound::Action);
+                poller.press(shared, &group.path, &action.action_path);
+            } else if surface_count(group) > 0 || !group.readouts.is_empty() {
+                *expand_request = Some(group.path.clone());
+            }
+        }
+    }
+
+    fn queue_numeric(
+        &mut self,
+        group: &DeviceGroup,
+        set: &SetActionSpec,
+        param: &RangeParam,
+        value: f64,
+        shared: &Shared,
+    ) -> (String, String) {
+        let clamped = param.clamp(value);
+        let value = if param.is_int {
+            clamped.round()
+        } else {
+            clamped
+        };
+        let key = (set.action_path.clone(), param.name.clone());
+        shared.set_pending_param(&group.path, &param.name, true);
+        shared.update(|s| {
+            s.states
+                .entry(group.path.clone())
+                .or_default()
+                .insert(param.name.clone(), json_numeric(value, param.is_int));
+        });
+        self.pending.insert(
+            key.clone(),
+            PendingNumeric {
+                value,
+                changed_at: Instant::now(),
+                group: group.path.clone(),
+                action_path: set.action_path.clone(),
+                required_inputs: set.required_inputs.clone(),
+                is_int: param.is_int,
+            },
+        );
+        key
+    }
+
+    fn expanded_card(
+        &mut self,
+        ui: &mut Ui,
+        group: &DeviceGroup,
+        snap: &Snapshot,
+        shared: &Arc<Shared>,
+        poller: &Poller,
+        collapse_request: &mut bool,
+    ) -> Rect {
+        let state = snap.states.get(&group.path);
+        let texture = self.texture_for(ui.ctx(), snap, &group.path);
+        let response = egui::Frame::new()
             .fill(PALETTE.surface_container)
             .corner_radius(CornerRadius::same(CARD_RADIUS))
             .stroke(Stroke::new(1.0, border_subtle()))
@@ -355,26 +808,15 @@ impl DevicesView {
 
                 ui.horizontal(|ui| {
                     let (rect, _) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::hover());
-                    match tex {
-                        Some(id) => {
-                            ui.painter().image(
-                                id,
-                                rect,
-                                egui::Rect::from_min_max(
-                                    egui::pos2(0.0, 0.0),
-                                    egui::pos2(1.0, 1.0),
-                                ),
-                                Color32::WHITE,
-                            );
-                        }
-                        None => {
-                            icons::draw_kind(
-                                ui.painter(),
-                                group.icon,
-                                rect.shrink(2.0),
-                                PALETTE.focus,
-                            );
-                        }
+                    if let Some(texture) = texture {
+                        ui.painter().image(
+                            texture,
+                            rect,
+                            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                            Color32::WHITE,
+                        );
+                    } else {
+                        icons::draw_kind(ui.painter(), group.icon, rect.shrink(2.0), PALETTE.focus);
                     }
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
@@ -384,15 +826,16 @@ impl DevicesView {
                                 .strong()
                                 .color(Color32::WHITE),
                         );
-                        if let Some(sub) = &group.subtitle {
-                            ui.label(RichText::new(sub).size(10.5).color(PALETTE.muted));
+                        if let Some(subtitle) = &group.subtitle {
+                            ui.label(RichText::new(subtitle).size(10.5).color(PALETTE.muted));
                         }
                     });
 
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spacing_mut().item_spacing = vec2(4.0, 0.0);
-                        toggle_collapse = chevron_button(ui, expanded);
-
+                        if chevron_button(ui, true) {
+                            *collapse_request = true;
+                        }
                         if let Some(set) = &group.set
                             && let Some(toggle) = &set.toggle_param
                         {
@@ -404,7 +847,6 @@ impl DevicesView {
                                 .in_flight
                                 .contains(&format!("{}:{toggle}", set.action_path));
                             if switch(ui, on, busy) {
-                                // Real JSON boolean, never 1/0 or "true".
                                 play(shared, UiSound::Toggle);
                                 poller.set_param(
                                     shared,
@@ -416,33 +858,16 @@ impl DevicesView {
                                 );
                             }
                         }
-
-                        if expanded {
-                            if move_button(ui, false) {
-                                play(shared, UiSound::Action);
-                                shared.move_device(&group.path, 1);
-                            }
-                            if move_button(ui, true) {
-                                play(shared, UiSound::Action);
-                                shared.move_device(&group.path, -1);
-                            }
+                        if move_button(ui, false) {
+                            play(shared, UiSound::Action);
+                            shared.move_device(&group.path, 1);
                         }
-
-                        if let Some(action) = header_action {
-                            // Leave breathing room on both sides of the inline
-                            // action instead of letting its fill run edge-to-edge
-                            // between the title and the switch.
-                            ui.add_space(8.0);
-                            let width = (ui.available_width() - 8.0).clamp(64.0, 180.0);
-                            action_tile(ui, group, snap, shared, poller, action, width, 28.0);
+                        if move_button(ui, true) {
+                            play(shared, UiSound::Action);
+                            shared.move_device(&group.path, -1);
                         }
                     });
                 });
-
-                if !expanded {
-                    self.first_control(ui, group, state, shared, poller);
-                    return;
-                }
 
                 if let Some(set) = &group.set {
                     let has_controls = !set.range_params.is_empty()
@@ -451,11 +876,11 @@ impl DevicesView {
                     if has_controls {
                         section_label(ui, "Controls");
                     }
-                    for r in &set.range_params {
-                        self.numeric_control(ui, group, set, r, state, shared, poller);
+                    for param in &set.range_params {
+                        self.numeric_control(ui, group, set, param, state, shared, poller);
                     }
-                    for e in &set.enum_params {
-                        enum_control(ui, group, set, e, state, shared, poller);
+                    for param in &set.enum_params {
+                        enum_control(ui, group, set, param, state, shared, poller);
                     }
                     for name in &set.string_params {
                         self.string_control(ui, group, set, name, state, shared, poller);
@@ -464,8 +889,8 @@ impl DevicesView {
 
                 if !group.readouts.is_empty() {
                     section_label(ui, "Status");
-                    for ro in &group.readouts {
-                        readout_row(ui, ro, state);
+                    for readout in &group.readouts {
+                        readout_row(ui, readout, state);
                     }
                 }
 
@@ -475,53 +900,16 @@ impl DevicesView {
                     for row in group.legacy.chunks(2) {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
-                            for l in row {
-                                action_tile(ui, group, snap, shared, poller, l, tile_width, 32.0);
+                            for action in row {
+                                action_tile(
+                                    ui, group, snap, shared, poller, action, tile_width, 32.0,
+                                );
                             }
                         });
                     }
                 }
             });
-        if toggle_collapse {
-            play(
-                shared,
-                if expanded {
-                    UiSound::Close
-                } else {
-                    UiSound::Open
-                },
-            );
-            if expanded {
-                self.expanded.remove(&group.path);
-            } else {
-                self.expanded.insert(group.path.clone());
-            }
-        }
-    }
-
-    /// Collapsed cards still expose the first interactive control, matching the
-    /// phone app's compact device tiles.
-    fn first_control(
-        &mut self,
-        ui: &mut Ui,
-        group: &DeviceGroup,
-        state: Option<&StateMap>,
-        shared: &Arc<Shared>,
-        poller: &Poller,
-    ) {
-        if let Some(set) = &group.set {
-            if let Some(r) = set.range_params.first() {
-                self.numeric_control(ui, group, set, r, state, shared, poller);
-                return;
-            }
-            if let Some(e) = set.enum_params.first() {
-                enum_control(ui, group, set, e, state, shared, poller);
-                return;
-            }
-            if let Some(name) = set.string_params.first() {
-                self.string_control(ui, group, set, name, state, shared, poller);
-            }
-        }
+        response.response.rect
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -530,17 +918,17 @@ impl DevicesView {
         ui: &mut Ui,
         group: &DeviceGroup,
         set: &SetActionSpec,
-        r: &RangeParam,
+        param: &RangeParam,
         state: Option<&StateMap>,
         shared: &Arc<Shared>,
         poller: &Poller,
     ) {
-        let key = (set.action_path.clone(), r.name.clone());
-        let mut v = self
+        let key = (set.action_path.clone(), param.name.clone());
+        let mut value = self
             .pending
             .get(&key)
-            .map(|p| p.value)
-            .unwrap_or_else(|| r.clamp(value_f64(state, &r.name, r.default_value())));
+            .map(|pending| pending.value)
+            .unwrap_or_else(|| param.clamp(value_f64(state, &param.name, param.default_value())));
 
         let mut changed = false;
         let mut flush_now = false;
@@ -549,27 +937,27 @@ impl DevicesView {
 
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing = vec2(ROW_GAP, 0.0);
-            control_label(ui, &prettify(&r.name));
+            control_label(ui, &prettify(&param.name));
 
-            if r.has_slider() {
+            if param.has_slider() {
                 ui.visuals_mut().widgets.inactive.bg_fill = PALETTE.track;
                 ui.spacing_mut().slider_width = (control_width - VALUE_WIDTH - ROW_GAP).max(80.0);
-                let (lo, hi) = (r.min.unwrap(), r.max.unwrap());
-                let mut slider = egui::Slider::new(&mut v, lo..=hi).show_value(false);
-                if r.is_int {
+                let (lo, hi) = (param.min.unwrap(), param.max.unwrap());
+                let mut slider = egui::Slider::new(&mut value, lo..=hi).show_value(false);
+                if param.is_int {
                     slider = slider.integer();
-                } else if let Some(step) = r.step {
+                } else if let Some(step) = param.step {
                     slider = slider.step_by(step);
                 }
-                let resp = ui.add(slider);
-                changed = resp.changed();
-                flush_now = resp.drag_stopped() || resp.lost_focus();
-                value_chip(ui, &format_number(v, r.is_int));
+                let response = ui.add(slider);
+                changed = response.changed();
+                flush_now = response.drag_stopped() || response.lost_focus();
+                value_chip(ui, &format_number(value, param.is_int));
             } else {
-                let step = r.step.unwrap_or(1.0);
+                let step = param.step.unwrap_or(1.0);
                 ui.allocate_ui_with_layout(
                     vec2(control_width, 22.0),
-                    Layout::left_to_right(Align::Center),
+                    egui::Layout::left_to_right(egui::Align::Center),
                     |ui| {
                         ui.spacing_mut().item_spacing = vec2(4.0, 0.0);
                         if ui
@@ -579,24 +967,25 @@ impl DevicesView {
                             )
                             .clicked()
                         {
-                            v = r.clamp(v - step);
+                            value = param.clamp(value - step);
                             changed = true;
                         }
-
-                        let mut dv =
-                            egui::DragValue::new(&mut v).speed(if r.is_int { 1.0 } else { 0.1 });
-                        if let (Some(lo), Some(hi)) = (r.min, r.max) {
-                            dv = dv.range(lo..=hi);
-                        } else if let Some(lo) = r.min {
-                            dv = dv.range(lo..=f64::MAX);
-                        } else if let Some(hi) = r.max {
-                            dv = dv.range(f64::MIN..=hi);
+                        let mut drag = egui::DragValue::new(&mut value).speed(if param.is_int {
+                            1.0
+                        } else {
+                            0.1
+                        });
+                        if let (Some(lo), Some(hi)) = (param.min, param.max) {
+                            drag = drag.range(lo..=hi);
+                        } else if let Some(lo) = param.min {
+                            drag = drag.range(lo..=f64::MAX);
+                        } else if let Some(hi) = param.max {
+                            drag = drag.range(f64::MIN..=hi);
                         }
-                        let dv_width = (control_width - 56.0).max(60.0);
-                        let resp = ui.add_sized([dv_width, 22.0], dv);
-                        changed |= resp.changed();
-                        flush_now |= resp.drag_stopped() || resp.lost_focus();
-
+                        let drag_width = (control_width - 56.0).max(60.0);
+                        let response = ui.add_sized([drag_width, 22.0], drag);
+                        changed |= response.changed();
+                        flush_now |= response.drag_stopped() || response.lost_focus();
                         if ui
                             .add_sized(
                                 [24.0, 22.0],
@@ -604,7 +993,7 @@ impl DevicesView {
                             )
                             .clicked()
                         {
-                            v = r.clamp(v + step);
+                            value = param.clamp(value + step);
                             changed = true;
                         }
                     },
@@ -613,54 +1002,35 @@ impl DevicesView {
         });
 
         if changed {
-            let clamped = r.clamp(v);
-            let value = if r.is_int { clamped.round() } else { clamped };
-            shared.set_pending_param(&group.path, &r.name, true);
-            shared.update(|s| {
-                s.states
-                    .entry(group.path.clone())
-                    .or_default()
-                    .insert(r.name.clone(), json_numeric(value, r.is_int));
-            });
-            self.pending.insert(
-                key.clone(),
-                PendingNumeric {
-                    value,
-                    changed_at: Instant::now(),
-                    group: group.path.clone(),
-                    action_path: set.action_path.clone(),
-                    required_inputs: set.required_inputs.clone(),
-                    is_int: r.is_int,
-                },
-            );
+            self.queue_numeric(group, set, param, value, shared);
         }
         if flush_now {
             self.flush_key(&key, shared, poller);
+            play(shared, UiSound::Action);
         }
     }
 
     fn flush_key(&mut self, key: &(String, String), shared: &Shared, poller: &Poller) {
-        if let Some(p) = self.pending.remove(key) {
-            let value = json_numeric(p.value, p.is_int);
+        if let Some(pending) = self.pending.remove(key) {
+            let value = json_numeric(pending.value, pending.is_int);
             poller.set_param(
                 shared,
-                &p.group,
-                &p.action_path,
-                &p.required_inputs,
+                &pending.group,
+                &pending.action_path,
+                &pending.required_inputs,
                 &key.1,
                 value,
             );
         }
     }
 
-    /// Send sliders that have been quiet for `SLIDER_DEBOUNCE`.
     fn flush_due(&mut self, ctx: &egui::Context, shared: &Shared, poller: &Poller) {
         let now = Instant::now();
         let due: Vec<_> = self
             .pending
             .iter()
-            .filter(|(_, p)| now.duration_since(p.changed_at) >= SLIDER_DEBOUNCE)
-            .map(|(k, _)| k.clone())
+            .filter(|(_, pending)| now.duration_since(pending.changed_at) >= SLIDER_DEBOUNCE)
+            .map(|(key, _)| key.clone())
             .collect();
         for key in due {
             self.flush_key(&key, shared, poller);
@@ -687,20 +1057,20 @@ impl DevicesView {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_owned();
-        let buf = self
+        let buffer = self
             .string_edits
-            .entry(key.clone())
+            .entry(key)
             .or_insert_with(|| current.clone());
         let row_width = ui.available_width();
         let control_width = (row_width - LABEL_WIDTH - ROW_GAP).max(120.0);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing = vec2(ROW_GAP, 0.0);
             control_label(ui, &prettify(name));
-            let resp = ui.add_sized(
+            let response = ui.add_sized(
                 [control_width, 24.0],
-                egui::TextEdit::singleline(buf).hint_text("value"),
+                egui::TextEdit::singleline(buffer).hint_text("value"),
             );
-            if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 play(shared, UiSound::Action);
                 poller.set_param(
                     shared,
@@ -708,10 +1078,10 @@ impl DevicesView {
                     &set.action_path,
                     &set.required_inputs,
                     name,
-                    json!(buf.clone()),
+                    json!(buffer.clone()),
                 );
-            } else if !resp.has_focus() && *buf != current {
-                *buf = current.clone(); // follow server state when not editing
+            } else if !response.has_focus() && *buffer != current {
+                *buffer = current.clone();
             }
         });
     }
@@ -734,7 +1104,7 @@ fn action_tile(
     } else {
         action.label.clone()
     };
-    let resp = ui
+    let response = ui
         .add_enabled_ui(!busy, |ui| {
             pill_button(
                 ui,
@@ -746,26 +1116,26 @@ fn action_tile(
         })
         .inner
         .on_hover_text(&action.action_path);
-    if resp.clicked() {
+    if response.clicked() {
         play(shared, UiSound::Action);
         poller.press(shared, &group.path, &action.action_path);
     }
 }
 
-fn readout_row(ui: &mut Ui, ro: &ReadoutSpec, state: Option<&StateMap>) {
+fn readout_row(ui: &mut Ui, readout: &ReadoutSpec, state: Option<&StateMap>) {
     ui.add_space(1.0);
     ui.horizontal_wrapped(|ui| {
-        if ro.fields.len() > 1 {
+        if readout.fields.len() > 1 {
             ui.label(
-                RichText::new(format!("{}:", ro.label))
+                RichText::new(format!("{}:", readout.label))
                     .size(11.0)
                     .color(PALETTE.muted),
             );
         }
-        for f in &ro.fields {
-            let val_text = state
-                .and_then(|s| s.get(&f.name))
-                .map(|v| format_readout_value(v, f.kind))
+        for field in &readout.fields {
+            let value = state
+                .and_then(|s| s.get(&field.name))
+                .map(|value| format_readout_value(value, field.kind))
                 .unwrap_or_else(|| "—".into());
             egui::Frame::new()
                 .fill(PALETTE.surface)
@@ -776,12 +1146,12 @@ fn readout_row(ui: &mut Ui, ro: &ReadoutSpec, state: Option<&StateMap>) {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing = vec2(4.0, 0.0);
                         ui.label(
-                            RichText::new(prettify(&f.name))
+                            RichText::new(prettify(&field.name))
                                 .size(11.0)
                                 .color(PALETTE.muted),
                         );
                         ui.label(
-                            RichText::new(val_text)
+                            RichText::new(value)
                                 .size(11.0)
                                 .monospace()
                                 .color(PALETTE.on_surface),
@@ -797,30 +1167,29 @@ fn enum_control(
     ui: &mut Ui,
     group: &DeviceGroup,
     set: &SetActionSpec,
-    e: &EnumParam,
+    param: &EnumParam,
     state: Option<&StateMap>,
     shared: &Arc<Shared>,
     poller: &Poller,
 ) {
-    let current = state.and_then(|s| s.get(&e.name));
+    let current = state.and_then(|s| s.get(&param.name));
     let row_width = ui.available_width();
     let control_width = (row_width - LABEL_WIDTH - ROW_GAP).max(120.0);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing = vec2(ROW_GAP, 0.0);
-        control_label(ui, &prettify(&e.name));
+        control_label(ui, &prettify(&param.name));
 
-        if e.options.len() <= PILL_MAX_OPTIONS {
+        if param.options.len() <= PILL_MAX_OPTIONS {
             ui.allocate_ui_with_layout(
                 vec2(control_width, 24.0),
-                Layout::left_to_right(Align::Center),
+                egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
                     ui.spacing_mut().item_spacing = vec2(4.0, 0.0);
-                    for opt in &e.options {
-                        let selected = current == Some(opt);
-                        let text = option_label(opt);
+                    for option in &param.options {
+                        let selected = current == Some(option);
                         if pill_button(
                             ui,
-                            RichText::new(text).size(11.5),
+                            RichText::new(option_label(option)).size(11.5),
                             vec2(0.0, 24.0),
                             255,
                             ButtonKind::Segment { active: selected },
@@ -834,8 +1203,8 @@ fn enum_control(
                                 &group.path,
                                 &set.action_path,
                                 &set.required_inputs,
-                                &e.name,
-                                opt.clone(),
+                                &param.name,
+                                option.clone(),
                             );
                         }
                     }
@@ -847,16 +1216,18 @@ fn enum_control(
                 .unwrap_or_else(|| "Select…".into());
             ui.allocate_ui_with_layout(
                 vec2(control_width, 24.0),
-                Layout::left_to_right(Align::Center),
+                egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
-                    let combo = egui::ComboBox::from_id_salt((&set.action_path, &e.name))
+                    let combo = egui::ComboBox::from_id_salt((&set.action_path, &param.name))
                         .width(control_width)
                         .selected_text(shown)
                         .show_ui(ui, |ui| {
                             ui.visuals_mut().interact_cursor = Some(egui::CursorIcon::PointingHand);
-                            for opt in &e.options {
-                                let selected = current == Some(opt);
-                                if ui.selectable_label(selected, option_label(opt)).clicked()
+                            for option in &param.options {
+                                let selected = current == Some(option);
+                                if ui
+                                    .selectable_label(selected, option_label(option))
+                                    .clicked()
                                     && !selected
                                 {
                                     play(shared, UiSound::Action);
@@ -865,8 +1236,8 @@ fn enum_control(
                                         &group.path,
                                         &set.action_path,
                                         &set.required_inputs,
-                                        &e.name,
-                                        opt.clone(),
+                                        &param.name,
+                                        option.clone(),
                                     );
                                 }
                             }

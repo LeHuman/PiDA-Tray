@@ -243,6 +243,7 @@ impl PiDaTrayApp {
             self.dirty_height = false;
         }
         self.devices.flush_all(&self.shared, &self.poller);
+        self.devices.collapse_expanded();
         self.visible = false;
         self.reveal_phase = RevealPhase::Hidden;
         self.view = View::Devices;
@@ -296,6 +297,7 @@ impl PiDaTrayApp {
                 }
                 TrayAction::Refresh => self.poller.send(Command::Sync),
                 TrayAction::Settings => {
+                    self.devices.collapse_expanded();
                     self.show(ctx, tray::cursor_pos(), true);
                     self.view = View::Settings;
                     self.settings.reset();
@@ -517,6 +519,7 @@ impl PiDaTrayApp {
             self.view = if self.view == View::Settings {
                 View::Devices
             } else {
+                self.devices.collapse_expanded();
                 View::Settings
             };
             if self.view == View::Devices {
