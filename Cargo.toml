@@ -1,0 +1,48 @@
+[package]
+name = "pida-tray"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Lightweight Windows system tray controller for a PiDA server"
+license = "MIT"
+repository = "https://github.com/LeHuman/PiDA-Tray"
+publish = false
+
+[dependencies]
+eframe = { version = "0.37", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow"] }
+tray-icon = "0.21"
+single-instance = "0.3"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
+reqwest = { version = "0.12", default-features = false, features = ["native-tls", "json"] }
+serde = { version = "1", features = ["derive"] }
+# `preserve_order` is REQUIRED: the schema's declaration order is meaningful.
+serde_json = { version = "1", features = ["preserve_order"] }
+dirs = "6"
+# PNG-only decoding for /api/icon/<path>
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6"
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Power",
+    "Win32_System_Registry",
+    "Win32_UI_HiDpi",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[build-dependencies]
+winresource = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+strip = true

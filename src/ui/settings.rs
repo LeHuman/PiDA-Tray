@@ -1,0 +1,276 @@
+//! Inline settings form.
+
+use std::sync::Arc;
+
+use eframe::egui::{
+    self, Align, Color32, CornerRadius, FontId, Frame, Layout, Margin, Pos2, RichText, Stroke, Ui,
+    Vec2,
+};
+
+use crate::{
+    config::{normalize_server_url, set_autostart},
+    constants::{FLYOUT_RADIUS, FLYOUT_WIDTH, IDLE_POLL_CHOICES, PALETTE},
+    poller::{Command, Poller, Shared},
+    theme::{border_subtle, hover_overlay},
+};
+
+#[derive(Default)]
+pub struct SettingsView {
+    url: String,
+    idle_poll_seconds: u64,
+    pin_flyout: bool,
+    launch_at_startup: bool,
+    error: Option<String>,
+    loaded: bool,
+}
+
+#[derive(Default)]
+pub struct SettingsOutcome {
+    pub close: bool,
+}
+
+fn poll_label(secs: u64) -> String {
+    if secs == 0 {
+        "Off (on open)".into()
+    } else {
+        format!("Every {secs}s")
+    }
+}
+
+impl SettingsView {
+    /// Re-read saved settings next time the form opens.
+    pub fn reset(&mut self) {
+        self.loaded = false;
+        self.error = None;
+    }
+
+    fn save(&mut self, shared: &Arc<Shared>, poller: &Poller) -> bool {
+        let normalized = match normalize_server_url(&self.url) {
+            Ok(u) => u,
+            Err(e) => {
+                self.error = Some(e);
+                return false;
+            }
+        };
+
+        let prev_autostart = shared.settings().launch_at_startup;
+        if self.launch_at_startup != prev_autostart
+            && let Err(e) = set_autostart(self.launch_at_startup)
+        {
+            self.error = Some(format!("Autostart: {e}"));
+            return false;
+        }
+
+        let prev_url = shared.settings().server_url;
+        self.url = normalized.clone();
+        self.error = None;
+        shared.update(|s| {
+            s.settings.server_url = normalized.clone();
+            s.settings.idle_poll_seconds = self.idle_poll_seconds;
+            s.settings.pin_flyout = self.pin_flyout;
+            s.settings.launch_at_startup = self.launch_at_startup;
+        });
+        shared.save_settings();
+        poller.send(Command::SettingsChanged);
+        if normalized != prev_url {
+            poller.send(Command::Sync);
+        }
+        true
+    }
+
+    pub fn show(&mut self, ui: &mut Ui, shared: &Arc<Shared>, poller: &Poller) -> SettingsOutcome {
+        let mut out = SettingsOutcome::default();
+        if !self.loaded {
+            let current = shared.settings();
+            self.url = current.server_url;
+            self.idle_poll_seconds = current.idle_poll_seconds;
+            self.pin_flyout = current.pin_flyout;
+            self.launch_at_startup = current.launch_at_startup;
+            self.loaded = true;
+        }
+
+        let mut submit = false;
+
+        Frame::new()
+            .inner_margin(Margin::symmetric(12, 12))
+            .show(ui, |ui| {
+                ui.set_width(FLYOUT_WIDTH - 24.0);
+                ui.spacing_mut().item_spacing = Vec2::new(0.0, 10.0);
+
+                // 1. Server URL
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(0.0, 4.0);
+                    ui.label(
+                        RichText::new("PiDA Server URL")
+                            .size(11.5)
+                            .strong()
+                            .color(PALETTE.on_surface),
+                    );
+                    let edit = egui::TextEdit::singleline(&mut self.url)
+                        .hint_text("http://192.0.2.10:9999")
+                        .font(FontId::monospace(12.0))
+                        .text_color(Color32::WHITE)
+                        .background_color(PALETTE.surface_container)
+                        .margin(Margin::symmetric(10, 7))
+                        .desired_width(FLYOUT_WIDTH - 24.0);
+                    let resp = ui.add(edit);
+                    if resp.changed() && self.error.is_some() {
+                        self.error = None;
+                    }
+                    if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        submit = true;
+                    }
+                    if let Some(e) = &self.error {
+                        ui.label(RichText::new(e).size(11.0).color(PALETTE.error));
+                    } else {
+                        ui.label(
+                            RichText::new("Local LAN address (e.g. http://192.0.2.10:9999)")
+                                .size(10.5)
+                                .color(PALETTE.muted),
+                        );
+                    }
+                });
+
+                // 2. Options card
+                Frame::new()
+                    .fill(PALETTE.surface_container)
+                    .corner_radius(CornerRadius::same(8))
+                    .stroke(Stroke::new(1.0, border_subtle()))
+                    .inner_margin(Margin::same(10))
+                    .show(ui, |ui| {
+                        ui.set_width(FLYOUT_WIDTH - 44.0);
+                        ui.spacing_mut().item_spacing = Vec2::new(0.0, 10.0);
+
+                        ui.horizontal(|ui| {
+                            ui.set_width(FLYOUT_WIDTH - 44.0);
+                            ui.label(
+                                RichText::new("Idle health check")
+                                    .size(12.0)
+                                    .color(PALETTE.on_surface),
+                            );
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                egui::ComboBox::from_id_salt("idle_poll")
+                                    .width(130.0)
+                                    .selected_text(
+                                        RichText::new(poll_label(self.idle_poll_seconds))
+                                            .size(11.5)
+                                            .monospace(),
+                                    )
+                                    .show_ui(ui, |ui| {
+                                        for c in IDLE_POLL_CHOICES {
+                                            ui.selectable_value(
+                                                &mut self.idle_poll_seconds,
+                                                c,
+                                                poll_label(c),
+                                            );
+                                        }
+                                    });
+                            });
+                        });
+
+                        ui.horizontal(|ui| {
+                            ui.set_width(FLYOUT_WIDTH - 44.0);
+                            ui.label(
+                                RichText::new("Keep flyout open")
+                                    .size(12.0)
+                                    .color(PALETTE.on_surface),
+                            );
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.checkbox(&mut self.pin_flyout, "");
+                            });
+                        });
+
+                        ui.horizontal(|ui| {
+                            ui.set_width(FLYOUT_WIDTH - 44.0);
+                            ui.label(
+                                RichText::new("Launch at Windows startup")
+                                    .size(12.0)
+                                    .color(PALETTE.on_surface),
+                            );
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.checkbox(&mut self.launch_at_startup, "");
+                            });
+                        });
+                    });
+
+                // 3. Cache control
+                ui.horizontal(|ui| {
+                    let btn = egui::Button::new(
+                        RichText::new("Clear cached schema & icons")
+                            .size(11.5)
+                            .color(PALETTE.on_surface_variant),
+                    )
+                    .fill(hover_overlay())
+                    .stroke(Stroke::new(1.0, border_subtle()))
+                    .corner_radius(CornerRadius::same(6));
+                    if ui.add(btn).clicked() {
+                        poller.send(Command::ClearCache);
+                    }
+                });
+            });
+
+        if submit && self.save(shared, poller) {
+            self.reset();
+            out.close = true;
+            return out;
+        }
+
+        // Bottom footer action bar
+        let sep_start = ui.next_widget_position();
+        ui.painter().line_segment(
+            [
+                sep_start,
+                Pos2::new(sep_start.x + FLYOUT_WIDTH, sep_start.y),
+            ],
+            Stroke::new(1.0, border_subtle()),
+        );
+
+        Frame::new()
+            .fill(PALETTE.surface_header)
+            .corner_radius(CornerRadius {
+                nw: 0,
+                ne: 0,
+                sw: FLYOUT_RADIUS,
+                se: FLYOUT_RADIUS,
+            })
+            .inner_margin(Margin::symmetric(12, 10))
+            .show(ui, |ui| {
+                ui.set_width(FLYOUT_WIDTH - 24.0);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(8.0, 0.0);
+
+                    let save_btn = egui::Button::new(
+                        RichText::new("Save")
+                            .size(12.0)
+                            .strong()
+                            .color(PALETTE.on_primary),
+                    )
+                    .fill(PALETTE.primary)
+                    .stroke(Stroke::NONE)
+                    .corner_radius(CornerRadius::same(6))
+                    .min_size(Vec2::new(66.0, 30.0));
+                    if ui.add(save_btn).clicked() && self.save(shared, poller) {
+                        self.reset();
+                        out.close = true;
+                    }
+
+                    let cancel_btn = egui::Button::new(
+                        RichText::new("Cancel")
+                            .size(12.0)
+                            .strong()
+                            .color(PALETTE.on_surface_variant),
+                    )
+                    .fill(Color32::TRANSPARENT)
+                    .stroke(Stroke::NONE)
+                    .corner_radius(CornerRadius::same(6))
+                    .min_size(Vec2::new(62.0, 30.0));
+                    if ui.add(cancel_btn).clicked() {
+                        self.reset();
+                        out.close = true;
+                    }
+                });
+            });
+
+        out
+    }
+}
