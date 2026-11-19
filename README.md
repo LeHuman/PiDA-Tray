@@ -29,6 +29,7 @@ Desktop access to server-managed home automation devices should not require keep
 - Single native Windows `.exe` built with `eframe` (`glow` renderer) and `tray-icon` — no WebView, Electron, or external runtime.
 - Early-returns UI rendering while hidden, with an optional slow `/api/health` check (`Off`, `30s`, `60s`, or `120s`) and Windows resume detection (`WM_POWERBROADCAST`).
 - Cache-first startup: loads the last saved `/api/schema`, device states, and `/api/icon/<path>` PNGs from `%APPDATA%\PiDA-Tray\` before refreshing in the background.
+- After every successful action, re-reads every group's state at 0.5 s, 1 s, 3 s, and 8 s (a newer action restarts the cascade), matching the Android client so fan-out actions and late-reflecting devices converge.
 - Tray icon uses the PiDA mark: full colour while connected, grayscale when offline or unconfigured, and red after a failed action.
 - Schema-driven controls preserving server YAML key order: boolean toggles, bounded sliders, numeric steppers, enum pills/dropdowns, string inputs, read-only state readouts, and legacy one-shot action buttons.
 - Collapsible device cards keep large catalogs compact; every card starts collapsed with its first control still visible (button actions render inline in the card header, sliders/steppers/enums/strings on a second line), and the flyout shrinks/grows to fit. Drag the top or bottom edge to resize (height is remembered).

@@ -9,7 +9,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex, MutexGuard,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -25,6 +25,15 @@ use crate::{
 };
 
 pub type StateMap = Map<String, Value>;
+
+/// Post-action settle passes, cumulative from the action: 0.5s, 1s, 3s, 8s.
+/// A newer action restarts the cascade, matching the Android client.
+const SETTLE_DELAYS: [Duration; 4] = [
+    Duration::from_millis(500),
+    Duration::from_millis(500),
+    Duration::from_secs(2),
+    Duration::from_secs(5),
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Connection {
@@ -74,6 +83,9 @@ pub struct Shared {
     repaint: Mutex<Option<RepaintFn>>,
     dir: PathBuf,
     visible: AtomicBool,
+    /// Generation counter for the post-action settle cascade; a newer action
+    /// supersedes any cascade still waiting on its delays.
+    settle_generation: AtomicU64,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -122,6 +134,7 @@ impl Shared {
             repaint: Mutex::new(None),
             dir,
             visible: AtomicBool::new(false),
+            settle_generation: AtomicU64::new(0),
         })
     }
 
@@ -139,6 +152,14 @@ impl Shared {
 
     pub fn is_visible(&self) -> bool {
         self.visible.load(Ordering::Relaxed)
+    }
+
+    fn begin_settle(&self) -> u64 {
+        self.settle_generation.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    fn settle_is_current(&self, generation: u64) -> bool {
+        self.settle_generation.load(Ordering::SeqCst) == generation
     }
 
     fn request_repaint(&self) {
@@ -574,6 +595,18 @@ async fn refresh_states(client: &PidaClient, shared: &Arc<Shared>) {
     shared.save_cache();
 }
 
+fn schedule_settle(client: PidaClient, shared: Arc<Shared>, generation: u64) {
+    tokio::spawn(async move {
+        for delay in SETTLE_DELAYS {
+            tokio::time::sleep(delay).await;
+            if !shared.settle_is_current(generation) {
+                return;
+            }
+            refresh_states(&client, &shared).await;
+        }
+    });
+}
+
 async fn refresh_icons(client: &PidaClient, shared: &Arc<Shared>) {
     // Icons are served per endpoint, so each card tries its set action, readouts, then legacy actions.
     let targets: Vec<(String, Vec<String>)> = shared.read(|s| {
@@ -649,6 +682,12 @@ async fn dispatch(client: PidaClient, shared: Arc<Shared>, req: DispatchRequest)
                 s.connection = Connection::Online;
             });
             shared.save_cache();
+
+            // Fan-out actions change other groups and some devices reflect
+            // late. Re-read every group four times (0.5/1/3/8s), restarting
+            // the cascade on each new successful action.
+            let generation = shared.begin_settle();
+            schedule_settle(client, shared, generation);
         }
         // A newer request in the same group queue replaced this one; its result will land.
         Err(e) if e.is_superseded() => shared.update(|s| dec_in_flight(s, &req)),
@@ -801,5 +840,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let shared = Shared::new(dir.path().to_path_buf());
         assert_eq!(shared.snapshot().connection, Connection::Unconfigured);
+    }
+
+    #[test]
+    fn settlement_cascade_last_action_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = Shared::new(dir.path().to_path_buf());
+        let first = shared.begin_settle();
+        assert!(shared.settle_is_current(first));
+
+        let second = shared.begin_settle();
+        assert!(!shared.settle_is_current(first));
+        assert!(shared.settle_is_current(second));
+        assert_eq!(
+            SETTLE_DELAYS.iter().sum::<Duration>(),
+            Duration::from_secs(8)
+        );
     }
 }
