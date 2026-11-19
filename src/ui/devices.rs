@@ -1,10 +1,11 @@
-//! Scrollable device cards: toggle, sliders, steppers, enum pills/dropdown, strings, readouts, legacy buttons.
+//! Scrollable device cards: collapsible groups with toggle, sliders, steppers,
+//! enum pills/dropdown, strings, status readouts, and action tiles.
 
 use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use eframe::egui::{
-    self, Color32, ColorImage, CornerRadius, Margin, RichText, Sense, Stroke, TextureHandle,
-    TextureOptions, Ui, vec2,
+    self, Align, Color32, ColorImage, CornerRadius, Layout, Margin, RichText, Sense, Stroke,
+    TextureHandle, TextureOptions, Ui, vec2,
 };
 use serde_json::{Value, json};
 
@@ -19,6 +20,11 @@ use crate::{
 
 /// Enums with at most this many options render as segmented pills.
 const PILL_MAX_OPTIONS: usize = 4;
+/// Shared label column so every control row lines up.
+const LABEL_WIDTH: f32 = 92.0;
+/// Fixed numeric readout column keeps all slider tracks the same length.
+const VALUE_WIDTH: f32 = 46.0;
+const ROW_GAP: f32 = 8.0;
 
 struct PendingNumeric {
     value: f64,
@@ -36,6 +42,8 @@ pub struct DevicesView {
     textures: HashMap<String, (usize, Option<TextureHandle>)>,
     pending: HashMap<(String, String), PendingNumeric>,
     string_edits: HashMap<(String, String), String>,
+    /// Device cards the user has collapsed (session-local).
+    collapsed: std::collections::HashSet<String>,
 }
 
 fn decode_png(bytes: &[u8]) -> Result<ColorImage, ApiError> {
@@ -78,6 +86,64 @@ fn switch(ui: &mut Ui, on: bool, busy: bool) -> bool {
     resp.clicked()
 }
 
+fn chevron_button(ui: &mut Ui, expanded: bool) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(vec2(24.0, 24.0), Sense::click());
+    if resp.hovered() {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(12), hover_overlay());
+    }
+    let color = if resp.hovered() {
+        Color32::WHITE
+    } else {
+        PALETTE.on_surface_variant
+    };
+    icons::chevron(ui.painter(), rect.shrink(6.0), color, expanded);
+    resp.on_hover_text(if expanded { "Collapse" } else { "Expand" })
+        .clicked()
+}
+
+fn control_label(ui: &mut Ui, text: &str) {
+    ui.allocate_ui_with_layout(
+        vec2(LABEL_WIDTH, 22.0),
+        Layout::left_to_right(Align::Center),
+        |ui| {
+            ui.add(
+                egui::Label::new(
+                    RichText::new(text)
+                        .size(12.0)
+                        .color(PALETTE.on_surface_variant),
+                )
+                .truncate(),
+            )
+            .on_hover_text(text);
+        },
+    );
+}
+
+fn value_chip(ui: &mut Ui, text: &str) {
+    ui.allocate_ui_with_layout(
+        vec2(VALUE_WIDTH, 22.0),
+        Layout::right_to_left(Align::Center),
+        |ui| {
+            ui.add(
+                egui::Label::new(
+                    RichText::new(text)
+                        .size(11.0)
+                        .monospace()
+                        .color(PALETTE.on_surface),
+                )
+                .truncate(),
+            );
+        },
+    );
+}
+
+fn section_label(ui: &mut Ui, text: &str) {
+    ui.add_space(2.0);
+    ui.label(RichText::new(text).size(9.5).strong().color(PALETTE.muted));
+    ui.add_space(1.0);
+}
+
 fn value_f64(state: Option<&StateMap>, name: &str, fallback: f64) -> f64 {
     state
         .and_then(|s| s.get(name))
@@ -89,6 +155,14 @@ fn option_label(v: &Value) -> String {
     v.as_str()
         .map(str::to_owned)
         .unwrap_or_else(|| v.to_string())
+}
+
+fn format_number(value: f64, is_int: bool) -> String {
+    if is_int {
+        format!("{}", value.round() as i64)
+    } else {
+        format!("{value:.2}")
+    }
 }
 
 fn format_readout_value(v: &Value, kind: ParamKind) -> String {
@@ -194,6 +268,8 @@ impl DevicesView {
     ) {
         let state = snap.states.get(&group.path);
         let tex = self.texture_for(ui.ctx(), snap, &group.path);
+        let expanded = !self.collapsed.contains(&group.path);
+        let mut toggle_collapse = false;
 
         egui::Frame::new()
             .fill(PALETTE.surface_container)
@@ -202,8 +278,10 @@ impl DevicesView {
             .inner_margin(Margin::same(10))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
+                ui.spacing_mut().item_spacing = vec2(8.0, 6.0);
+
                 ui.horizontal(|ui| {
-                    let (rect, _) = ui.allocate_exact_size(vec2(26.0, 26.0), Sense::hover());
+                    let (rect, _) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::hover());
                     match tex {
                         Some(id) => {
                             ui.painter().image(
@@ -238,10 +316,13 @@ impl DevicesView {
                         }
                     });
 
-                    if let Some(set) = &group.set
-                        && let Some(toggle) = &set.toggle_param
-                    {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing = vec2(4.0, 0.0);
+                        toggle_collapse = chevron_button(ui, expanded);
+
+                        if let Some(set) = &group.set
+                            && let Some(toggle) = &set.toggle_param
+                        {
                             let on = state
                                 .and_then(|s| s.get(toggle))
                                 .and_then(Value::as_bool)
@@ -260,11 +341,21 @@ impl DevicesView {
                                     json!(!on),
                                 );
                             }
-                        });
-                    }
+                        }
+                    });
                 });
 
+                if !expanded {
+                    return;
+                }
+
                 if let Some(set) = &group.set {
+                    let has_controls = !set.range_params.is_empty()
+                        || !set.enum_params.is_empty()
+                        || !set.string_params.is_empty();
+                    if has_controls {
+                        section_label(ui, "Controls");
+                    }
                     for r in &set.range_params {
                         self.numeric_control(ui, group, set, r, state, shared, poller);
                     }
@@ -276,37 +367,52 @@ impl DevicesView {
                     }
                 }
 
-                for ro in &group.readouts {
-                    readout_row(ui, ro, state);
+                if !group.readouts.is_empty() {
+                    section_label(ui, "Status");
+                    for ro in &group.readouts {
+                        readout_row(ui, ro, state);
+                    }
                 }
 
                 if !group.legacy.is_empty() {
-                    ui.add_space(4.0);
-                    ui.horizontal_wrapped(|ui| {
-                        for l in &group.legacy {
-                            let busy = snap.in_flight.contains(&l.action_path);
-                            let label = if busy {
-                                format!("{} …", l.label)
-                            } else {
-                                l.label.clone()
-                            };
-                            let btn = egui::Button::new(
-                                RichText::new(label).size(11.5).color(PALETTE.on_surface),
-                            )
-                            .fill(if busy {
-                                PALETTE.surface_container_high
-                            } else {
-                                hover_overlay()
-                            })
-                            .stroke(Stroke::new(1.0, border_subtle()))
-                            .corner_radius(CornerRadius::same(6));
-                            if ui.add_enabled(!busy, btn).clicked() {
-                                poller.press(shared, &group.path, &l.action_path);
+                    section_label(ui, "Actions");
+                    let tile_width = ((ui.available_width() - 6.0) / 2.0).max(80.0);
+                    for row in group.legacy.chunks(2) {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                            for l in row {
+                                let busy = snap.in_flight.contains(&l.action_path);
+                                let label = if busy {
+                                    format!("{} …", l.label)
+                                } else {
+                                    l.label.clone()
+                                };
+                                let btn = egui::Button::new(
+                                    RichText::new(label).size(11.5).color(PALETTE.on_surface),
+                                )
+                                .fill(PALETTE.surface_container_high)
+                                .stroke(Stroke::new(1.0, border_subtle()))
+                                .corner_radius(CornerRadius::same(8))
+                                .min_size(vec2(tile_width, 32.0));
+                                if ui
+                                    .add_enabled(!busy, btn)
+                                    .on_hover_text(&l.action_path)
+                                    .clicked()
+                                {
+                                    poller.press(shared, &group.path, &l.action_path);
+                                }
                             }
-                        }
-                    });
+                        });
+                    }
                 }
             });
+        if toggle_collapse {
+            if expanded {
+                self.collapsed.insert(group.path.clone());
+            } else {
+                self.collapsed.remove(&group.path);
+            }
+        }
         ui.add_space(6.0);
     }
 
@@ -330,28 +436,18 @@ impl DevicesView {
 
         let mut changed = false;
         let mut flush_now = false;
+        let row_width = ui.available_width();
+        let control_width = (row_width - LABEL_WIDTH - ROW_GAP).max(120.0);
 
         ui.horizontal(|ui| {
-            let label = prettify(&r.name);
-            ui.allocate_ui_with_layout(
-                vec2(96.0, 20.0),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| {
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(&label)
-                                .size(12.0)
-                                .color(PALETTE.on_surface_variant),
-                        )
-                        .truncate(),
-                    )
-                    .on_hover_text(&label);
-                },
-            );
+            ui.spacing_mut().item_spacing = vec2(ROW_GAP, 0.0);
+            control_label(ui, &prettify(&r.name));
+
             if r.has_slider() {
-                ui.spacing_mut().slider_width = (ui.available_width() - 62.0).clamp(100.0, 155.0);
+                ui.visuals_mut().widgets.inactive.bg_fill = PALETTE.track;
+                ui.spacing_mut().slider_width = (control_width - VALUE_WIDTH - ROW_GAP).max(80.0);
                 let (lo, hi) = (r.min.unwrap(), r.max.unwrap());
-                let mut slider = egui::Slider::new(&mut v, lo..=hi).show_value(true);
+                let mut slider = egui::Slider::new(&mut v, lo..=hi).show_value(false);
                 if r.is_int {
                     slider = slider.integer();
                 } else if let Some(step) = r.step {
@@ -360,27 +456,51 @@ impl DevicesView {
                 let resp = ui.add(slider);
                 changed = resp.changed();
                 flush_now = resp.drag_stopped() || resp.lost_focus();
+                value_chip(ui, &format_number(v, r.is_int));
             } else {
                 let step = r.step.unwrap_or(1.0);
-                if ui.small_button("−").clicked() {
-                    v = r.clamp(v - step);
-                    changed = true;
-                }
-                let mut dv = egui::DragValue::new(&mut v).speed(if r.is_int { 1.0 } else { 0.1 });
-                if let (Some(lo), Some(hi)) = (r.min, r.max) {
-                    dv = dv.range(lo..=hi);
-                } else if let Some(lo) = r.min {
-                    dv = dv.range(lo..=f64::MAX);
-                } else if let Some(hi) = r.max {
-                    dv = dv.range(f64::MIN..=hi);
-                }
-                let resp = ui.add(dv);
-                changed |= resp.changed();
-                flush_now |= resp.drag_stopped() || resp.lost_focus();
-                if ui.small_button("+").clicked() {
-                    v = r.clamp(v + step);
-                    changed = true;
-                }
+                ui.allocate_ui_with_layout(
+                    vec2(control_width, 22.0),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        ui.spacing_mut().item_spacing = vec2(4.0, 0.0);
+                        if ui
+                            .add_sized(
+                                [24.0, 22.0],
+                                egui::Button::new(RichText::new("−").size(14.0)),
+                            )
+                            .clicked()
+                        {
+                            v = r.clamp(v - step);
+                            changed = true;
+                        }
+
+                        let mut dv =
+                            egui::DragValue::new(&mut v).speed(if r.is_int { 1.0 } else { 0.1 });
+                        if let (Some(lo), Some(hi)) = (r.min, r.max) {
+                            dv = dv.range(lo..=hi);
+                        } else if let Some(lo) = r.min {
+                            dv = dv.range(lo..=f64::MAX);
+                        } else if let Some(hi) = r.max {
+                            dv = dv.range(f64::MIN..=hi);
+                        }
+                        let dv_width = (control_width - 56.0).max(60.0);
+                        let resp = ui.add_sized([dv_width, 22.0], dv);
+                        changed |= resp.changed();
+                        flush_now |= resp.drag_stopped() || resp.lost_focus();
+
+                        if ui
+                            .add_sized(
+                                [24.0, 22.0],
+                                egui::Button::new(RichText::new("+").size(14.0)),
+                            )
+                            .clicked()
+                        {
+                            v = r.clamp(v + step);
+                            changed = true;
+                        }
+                    },
+                );
             }
         });
 
@@ -463,13 +583,15 @@ impl DevicesView {
             .string_edits
             .entry(key.clone())
             .or_insert_with(|| current.clone());
+        let row_width = ui.available_width();
+        let control_width = (row_width - LABEL_WIDTH - ROW_GAP).max(120.0);
         ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(prettify(name))
-                    .size(12.0)
-                    .color(PALETTE.on_surface_variant),
+            ui.spacing_mut().item_spacing = vec2(ROW_GAP, 0.0);
+            control_label(ui, &prettify(name));
+            let resp = ui.add_sized(
+                [control_width, 24.0],
+                egui::TextEdit::singleline(buf).hint_text("value"),
             );
-            let resp = ui.add(egui::TextEdit::singleline(buf).desired_width(ui.available_width()));
             if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 poller.set_param(
                     shared,
@@ -487,7 +609,7 @@ impl DevicesView {
 }
 
 fn readout_row(ui: &mut Ui, ro: &ReadoutSpec, state: Option<&StateMap>) {
-    ui.add_space(2.0);
+    ui.add_space(1.0);
     ui.horizontal_wrapped(|ui| {
         if ro.fields.len() > 1 {
             ui.label(
@@ -503,7 +625,7 @@ fn readout_row(ui: &mut Ui, ro: &ReadoutSpec, state: Option<&StateMap>) {
                 .unwrap_or_else(|| "—".into());
             egui::Frame::new()
                 .fill(PALETTE.surface)
-                .corner_radius(CornerRadius::same(6))
+                .corner_radius(CornerRadius::same(7))
                 .stroke(Stroke::new(1.0, border_subtle()))
                 .inner_margin(Margin::symmetric(7, 3))
                 .show(ui, |ui| {
@@ -537,53 +659,39 @@ fn enum_control(
     poller: &Poller,
 ) {
     let current = state.and_then(|s| s.get(&e.name));
-    ui.horizontal_wrapped(|ui| {
-        ui.label(
-            RichText::new(prettify(&e.name))
-                .size(12.0)
-                .color(PALETTE.on_surface_variant),
-        );
+    let row_width = ui.available_width();
+    let control_width = (row_width - LABEL_WIDTH - ROW_GAP).max(120.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing = vec2(ROW_GAP, 0.0);
+        control_label(ui, &prettify(&e.name));
+
         if e.options.len() <= PILL_MAX_OPTIONS {
-            for opt in &e.options {
-                let selected = current == Some(opt);
-                let text = option_label(opt);
-                let btn = egui::Button::new(RichText::new(text).size(11.5).color(if selected {
-                    Color32::WHITE
-                } else {
-                    PALETTE.on_surface
-                }))
-                .fill(if selected {
-                    PALETTE.primary
-                } else {
-                    PALETTE.surface_container_high
-                })
-                .stroke(if selected {
-                    Stroke::NONE
-                } else {
-                    Stroke::new(1.0, border_subtle())
-                })
-                .corner_radius(CornerRadius::same(255));
-                if ui.add(btn).clicked() && !selected {
-                    poller.set_param(
-                        shared,
-                        &group.path,
-                        &set.action_path,
-                        &set.required_inputs,
-                        &e.name,
-                        opt.clone(),
-                    );
-                }
-            }
-        } else {
-            let shown = current
-                .map(option_label)
-                .unwrap_or_else(|| "Select…".into());
-            egui::ComboBox::from_id_salt((&set.action_path, &e.name))
-                .selected_text(shown)
-                .show_ui(ui, |ui| {
+            ui.allocate_ui_with_layout(
+                vec2(control_width, 24.0),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    ui.spacing_mut().item_spacing = vec2(4.0, 0.0);
                     for opt in &e.options {
                         let selected = current == Some(opt);
-                        if ui.selectable_label(selected, option_label(opt)).clicked() && !selected {
+                        let text = option_label(opt);
+                        let btn =
+                            egui::Button::new(RichText::new(text).size(11.5).color(if selected {
+                                Color32::WHITE
+                            } else {
+                                PALETTE.on_surface
+                            }))
+                            .fill(if selected {
+                                PALETTE.primary
+                            } else {
+                                PALETTE.surface_container_high
+                            })
+                            .stroke(if selected {
+                                Stroke::NONE
+                            } else {
+                                Stroke::new(1.0, border_subtle())
+                            })
+                            .corner_radius(CornerRadius::same(255));
+                        if ui.add(btn).clicked() && !selected {
                             poller.set_param(
                                 shared,
                                 &group.path,
@@ -594,7 +702,38 @@ fn enum_control(
                             );
                         }
                     }
-                });
+                },
+            );
+        } else {
+            let shown = current
+                .map(option_label)
+                .unwrap_or_else(|| "Select…".into());
+            ui.allocate_ui_with_layout(
+                vec2(control_width, 24.0),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    egui::ComboBox::from_id_salt((&set.action_path, &e.name))
+                        .width(control_width)
+                        .selected_text(shown)
+                        .show_ui(ui, |ui| {
+                            for opt in &e.options {
+                                let selected = current == Some(opt);
+                                if ui.selectable_label(selected, option_label(opt)).clicked()
+                                    && !selected
+                                {
+                                    poller.set_param(
+                                        shared,
+                                        &group.path,
+                                        &set.action_path,
+                                        &set.required_inputs,
+                                        &e.name,
+                                        opt.clone(),
+                                    );
+                                }
+                            }
+                        });
+                },
+            );
         }
     });
 }

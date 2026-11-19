@@ -47,15 +47,21 @@ fn main() -> eframe::Result<()> {
         .with_app_id(constants::APP_NAME)
         .with_inner_size([
             constants::FLYOUT_OUTER_WIDTH,
-            constants::FLYOUT_MIN_HEIGHT + 120.0,
+            constants::FLYOUT_DEFAULT_HEIGHT,
         ])
         .with_decorations(false)
         .with_transparent(true)
         .with_has_shadow(false)
-        .with_resizable(false)
+        .with_resizable(true)
+        .with_min_inner_size([constants::FLYOUT_OUTER_WIDTH, constants::FLYOUT_MIN_HEIGHT])
+        .with_max_inner_size([constants::FLYOUT_OUTER_WIDTH, constants::FLYOUT_MAX_HEIGHT])
+        .with_active(false)
         .with_window_level(egui::WindowLevel::AlwaysOnTop)
         .with_taskbar(false)
-        .with_visible(false) // eframe ignores on first map; App::logic also hides once on frame 0
+        // Keep the window mapped but parked off-screen: hiding it with
+        // `set_visible` leaves a blank swap chain that eframe does not repaint
+        // until an unrelated input event arrives.
+        .with_position([-32000.0, -32000.0])
         .with_icon(Arc::new(app_icon));
 
     let options = eframe::NativeOptions {
@@ -78,6 +84,9 @@ fn main() -> eframe::Result<()> {
     result
 }
 
+#[cfg(windows)]
+static WINDOW_HWND: std::sync::OnceLock<isize> = std::sync::OnceLock::new();
+
 /// Disable DWM non-client rendering so Windows does not draw a 1px grey frame or
 /// rectangular drop shadow around the transparent rounded flyout card.
 #[cfg(windows)]
@@ -97,6 +106,7 @@ pub(crate) fn ensure_borderless_window_policy(frame: &eframe::Frame) {
         let RawWindowHandle::Win32(win32) = handle.as_raw() else {
             return;
         };
+        WINDOW_HWND.set(win32.hwnd.get()).ok();
         let hwnd = HWND(win32.hwnd.get() as *mut core::ffi::c_void);
         let policy: i32 = DWMNCRP_DISABLED.0;
         // SAFETY: `hwnd` is a valid top-level window for the current frame and `policy` matches `i32` attribute size.
@@ -111,5 +121,30 @@ pub(crate) fn ensure_borderless_window_policy(frame: &eframe::Frame) {
     });
 }
 
+/// Cloak the mapped window so it cannot take focus or appear in Alt+Tab while parked.
+#[cfg(windows)]
+pub(crate) fn set_window_cloaked(cloaked: bool) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Dwm::{DWMWA_CLOAK, DwmSetWindowAttribute};
+
+    let Some(raw) = WINDOW_HWND.get().copied() else {
+        return;
+    };
+    let value: i32 = i32::from(cloaked);
+    let hwnd = HWND(raw as *mut core::ffi::c_void);
+    // SAFETY: the HWND was captured from the live window and `value` lives for the call.
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAK,
+            (&raw const value).cast(),
+            size_of::<i32>() as u32,
+        );
+    }
+}
+
 #[cfg(not(windows))]
 pub(crate) fn ensure_borderless_window_policy(_frame: &eframe::Frame) {}
+
+#[cfg(not(windows))]
+pub(crate) fn set_window_cloaked(_cloaked: bool) {}

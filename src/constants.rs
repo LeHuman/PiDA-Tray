@@ -15,12 +15,15 @@ pub const FLYOUT_WIDTH: f32 = 360.0;
 /// swapchain never clips the right or bottom hairline.
 pub const CARD_STROKE_WIDTH: f32 = 1.0;
 pub const FLYOUT_OUTER_WIDTH: f32 = FLYOUT_WIDTH + 2.0 * CARD_STROKE_WIDTH;
-pub const FLYOUT_MIN_HEIGHT: f32 = 140.0;
-pub const FLYOUT_MAX_HEIGHT: f32 = 560.0;
+pub const FLYOUT_MIN_HEIGHT: f32 = 260.0;
+/// Initial content-hug height before the first frame measures the cards.
+pub const FLYOUT_DEFAULT_HEIGHT: f32 = 720.0;
+/// Upper bound; the actual cap is also clamped to the monitor work area.
+pub const FLYOUT_MAX_HEIGHT: f32 = 900.0;
 pub const FLYOUT_SCREEN_MARGIN: f32 = 8.0;
 pub const FLYOUT_PADDING: f32 = 12.0;
 pub const FLYOUT_RADIUS: u8 = 12;
-pub const CARD_RADIUS: u8 = 8;
+pub const CARD_RADIUS: u8 = 10;
 
 // Timings
 pub const FOCUS_LOSS_GRACE: Duration = Duration::from_millis(220);
@@ -47,6 +50,7 @@ pub struct Palette {
     pub surface_container: Color32,
     pub surface_container_high: Color32,
     pub outline: Color32,
+    pub track: Color32,
     pub on_surface: Color32,
     pub on_surface_variant: Color32,
     pub muted: Color32,
@@ -65,6 +69,7 @@ pub const PALETTE: Palette = Palette {
     surface_container: Color32::from_rgb(0x18, 0x1B, 0x22), // #181B22
     surface_container_high: Color32::from_rgb(0x21, 0x26, 0x30), // #212630
     outline: Color32::from_rgb(0x64, 0x74, 0x8B), // #64748B
+    track: Color32::from_rgb(0x33, 0x3A, 0x48),   // #333A48
     on_surface: Color32::from_rgb(0xE6, 0xE8, 0xEE), // #E6E8EE
     on_surface_variant: Color32::from_rgb(0x9C, 0xA3, 0xAF), // #9CA3AF
     muted: Color32::from_rgb(0x8D, 0x95, 0xA5),   // #8D95A5

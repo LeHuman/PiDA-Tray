@@ -114,6 +114,7 @@ pub fn apply_visuals(ctx: &egui::Context) {
         style.spacing.item_spacing = egui::vec2(8.0, 8.0);
         style.spacing.button_padding = egui::vec2(10.0, 5.0);
         style.spacing.slider_width = 185.0;
+        style.spacing.slider_rail_height = 5.0;
     });
 }
 

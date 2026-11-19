@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::constants::{APP_DIR_NAME, DEFAULT_IDLE_POLL_SECONDS};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     /// Empty means "not configured yet".
@@ -15,6 +15,9 @@ pub struct Settings {
     pub idle_poll_seconds: u64,
     pub pin_flyout: bool,
     pub launch_at_startup: bool,
+    /// `Some` when the user dragged the flyout to a custom height.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flyout_height: Option<f32>,
 }
 
 impl Default for Settings {
@@ -24,6 +27,7 @@ impl Default for Settings {
             idle_poll_seconds: DEFAULT_IDLE_POLL_SECONDS,
             pin_flyout: false,
             launch_at_startup: false,
+            flyout_height: None,
         }
     }
 }
@@ -257,6 +261,7 @@ mod tests {
             idle_poll_seconds: 30,
             pin_flyout: true,
             launch_at_startup: false,
+            flyout_height: Some(700.0),
         };
         s.save(dir.path()).unwrap();
         assert_eq!(Settings::load(dir.path()), s);

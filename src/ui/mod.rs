@@ -14,9 +14,9 @@ use eframe::egui::{self, CornerRadius, Margin, RichText, Stroke, ViewportCommand
 
 use crate::{
     constants::{
-        CARD_STROKE_WIDTH, FLYOUT_MAX_HEIGHT, FLYOUT_MIN_HEIGHT, FLYOUT_OUTER_WIDTH,
-        FLYOUT_PADDING, FLYOUT_RADIUS, FLYOUT_SCREEN_MARGIN, FLYOUT_WIDTH, FOCUS_LOSS_GRACE,
-        PALETTE,
+        CARD_STROKE_WIDTH, FLYOUT_DEFAULT_HEIGHT, FLYOUT_MAX_HEIGHT, FLYOUT_MIN_HEIGHT,
+        FLYOUT_OUTER_WIDTH, FLYOUT_PADDING, FLYOUT_RADIUS, FLYOUT_SCREEN_MARGIN, FLYOUT_WIDTH,
+        FOCUS_LOSS_GRACE, PALETTE,
     },
     poller::{Command, Connection, Poller, Shared},
     power,
@@ -37,11 +37,19 @@ pub struct PiDaTrayApp {
     tray: Option<TrayController>,
 
     visible: bool,
-    hid_startup_window: bool,
+    startup_parked: bool,
     view: View,
     /// Tray-icon centre in physical pixels, used to (re)place the flyout.
     anchor: Option<(f32, f32)>,
     last_height: f32,
+    /// Set when the user drags the flyout to a custom height.
+    manual_height: Option<f32>,
+    /// Content-fit cap for this monitor's work area.
+    max_height: f32,
+    /// Frames to wait for our own size command before treating a different
+    /// window height as a user resize.
+    size_settle: u8,
+    dirty_height: bool,
     shown_at: Option<Instant>,
     seen_focused_while_shown: bool,
     quitting: bool,
@@ -80,16 +88,26 @@ impl PiDaTrayApp {
             });
         }
 
+        let manual_height = shared
+            .settings()
+            .flyout_height
+            .filter(|h| h.is_finite() && *h >= FLYOUT_MIN_HEIGHT);
+        let last_height = manual_height.unwrap_or(FLYOUT_DEFAULT_HEIGHT);
+
         Self {
             shared,
             poller,
             actions,
             tray,
             visible: false,
-            hid_startup_window: false,
+            startup_parked: false,
             view: View::Devices,
             anchor: None,
-            last_height: FLYOUT_MIN_HEIGHT + 120.0,
+            last_height,
+            manual_height,
+            max_height: FLYOUT_MAX_HEIGHT,
+            size_settle: 0,
+            dirty_height: false,
             shown_at: None,
             seen_focused_while_shown: false,
             quitting: false,
@@ -100,7 +118,7 @@ impl PiDaTrayApp {
 
     // -- window management ---------------------------------------------------
 
-    fn place(&self, ctx: &egui::Context) {
+    fn place(&mut self, ctx: &egui::Context) {
         let Some(anchor) = self.anchor else { return };
         let Some((work, monitor)) = tray::monitor_rects_at(anchor.0, anchor.1) else {
             return;
@@ -109,10 +127,13 @@ impl PiDaTrayApp {
         let target_ppp = tray::monitor_dpi_scale_at(anchor.0, anchor.1)
             .unwrap_or(current_ppp)
             .max(0.5);
-        let size_px = (
-            FLYOUT_OUTER_WIDTH * target_ppp,
-            self.last_height * target_ppp,
-        );
+        self.max_height = ((work.bottom - work.top) / target_ppp - 2.0 * FLYOUT_SCREEN_MARGIN)
+            .clamp(FLYOUT_MIN_HEIGHT, FLYOUT_MAX_HEIGHT);
+        let height = self
+            .manual_height
+            .unwrap_or(self.last_height)
+            .clamp(FLYOUT_MIN_HEIGHT, self.max_height);
+        let size_px = (FLYOUT_OUTER_WIDTH * target_ppp, height * target_ppp);
         let (x, y) = tray::compute_flyout_pos(
             anchor,
             size_px,
@@ -127,7 +148,15 @@ impl PiDaTrayApp {
         )));
     }
 
+    fn park(&self, ctx: &egui::Context) {
+        crate::set_window_cloaked(true);
+        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(egui::pos2(
+            -32000.0, -32000.0,
+        )));
+    }
+
     fn show(&mut self, ctx: &egui::Context, anchor: Option<(f32, f32)>) {
+        crate::set_window_cloaked(false);
         self.anchor = anchor.or(self.anchor).or_else(tray::cursor_pos);
         self.visible = true;
         self.view = View::Devices;
@@ -135,13 +164,35 @@ impl PiDaTrayApp {
         self.seen_focused_while_shown = false;
         self.shared.set_visible(true);
         self.place(ctx);
+        self.last_height = self
+            .manual_height
+            .unwrap_or(self.last_height)
+            .clamp(FLYOUT_MIN_HEIGHT, self.max_height);
+        ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(
+            FLYOUT_OUTER_WIDTH,
+            self.last_height,
+        )));
+        self.place(ctx);
+        self.size_settle = 3;
+        ctx.send_viewport_cmd(ViewportCommand::MaxInnerSize(vec2(
+            FLYOUT_OUTER_WIDTH,
+            self.max_height,
+        )));
         ctx.send_viewport_cmd(ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(ViewportCommand::Focus);
         self.poller.send(Command::Sync);
         ctx.request_repaint();
+        ctx.request_repaint_after(std::time::Duration::from_millis(16));
     }
 
     fn hide(&mut self, ctx: &egui::Context) {
+        if self.dirty_height {
+            let flyout_height = self.manual_height;
+            self.shared
+                .update(|s| s.settings.flyout_height = flyout_height);
+            self.shared.save_settings();
+            self.dirty_height = false;
+        }
         self.devices.flush_all(&self.shared, &self.poller);
         self.visible = false;
         self.view = View::Devices;
@@ -149,7 +200,8 @@ impl PiDaTrayApp {
         self.shown_at = None;
         self.seen_focused_while_shown = false;
         self.shared.set_visible(false);
-        ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+        self.park(ctx);
+        ctx.request_repaint();
     }
 
     fn handle_close_request(&mut self, ctx: &egui::Context) {
@@ -242,11 +294,13 @@ impl PiDaTrayApp {
 
                     let head = header::show(ui, &snap, self.view == View::Settings);
                     let mut close_settings = false;
+                    let mut reset_size = false;
 
                     match self.view {
                         View::Settings => {
-                            close_settings =
-                                self.settings.show(ui, &self.shared, &self.poller).close;
+                            let outcome = self.settings.show(ui, &self.shared, &self.poller);
+                            close_settings = outcome.close;
+                            reset_size = outcome.reset_size;
                         }
                         View::Devices => {
                             egui::Frame::new()
@@ -306,18 +360,22 @@ impl PiDaTrayApp {
                                                     .size(11.0),
                                             );
                                         }
-                                        let scroll_max = FLYOUT_MAX_HEIGHT
-                                            - 84.0
-                                            - if snap.banner.is_some() { 46.0 } else { 0.0 }
-                                            - if snap.connection == Connection::Offline
-                                                && !snap.catalog.is_empty()
-                                            {
-                                                24.0
-                                            } else {
-                                                0.0
-                                            };
+                                        let extra =
+                                            (if snap.banner.is_some() { 46.0 } else { 0.0 })
+                                                + (if snap.connection == Connection::Offline
+                                                    && !snap.catalog.is_empty()
+                                                {
+                                                    24.0
+                                                } else {
+                                                    0.0
+                                                });
+                                        let scroll_max = if self.manual_height.is_some() {
+                                            ui.available_height().max(120.0)
+                                        } else {
+                                            (self.max_height - 84.0 - extra).max(120.0)
+                                        };
                                         egui::ScrollArea::vertical()
-                                            .max_height(scroll_max.max(120.0))
+                                            .max_height(scroll_max)
                                             .auto_shrink([false, true])
                                             .show(ui, |ui| {
                                                 self.devices.show(
@@ -331,10 +389,23 @@ impl PiDaTrayApp {
                                 });
                         }
                     }
-                    (head, close_settings)
+                    (head, close_settings, reset_size)
                 });
 
-                let (head, close_settings) = outcome.inner;
+                let (head, close_settings, reset_size) = outcome.inner;
+                if reset_size {
+                    self.manual_height = None;
+                    self.last_height = FLYOUT_DEFAULT_HEIGHT;
+                    self.shared.update(|s| s.settings.flyout_height = None);
+                    self.shared.save_settings();
+                    self.size_settle = 3;
+                    ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(
+                        FLYOUT_OUTER_WIDTH,
+                        self.last_height,
+                    )));
+                    self.place(&ctx);
+                    ctx.request_repaint();
+                }
                 if close_settings {
                     self.view = View::Devices;
                 }
@@ -368,12 +439,26 @@ impl PiDaTrayApp {
                 Some(outcome.response.rect.height())
             });
 
-        // Content-hugging height, clamped.
+        // Content-hugging height, unless the user dragged the flyout to a custom size.
         if let Some(measured) = outer.inner {
-            let target = measured.ceil().clamp(FLYOUT_MIN_HEIGHT, FLYOUT_MAX_HEIGHT);
-            if (target - self.last_height).abs() > 1.5 {
+            if self.size_settle > 0 {
+                self.size_settle -= 1;
+            } else if let Some(actual) =
+                ctx.input(|i| i.viewport().inner_rect.map(|rect| rect.height()))
+                && (actual - self.last_height).abs() > 2.0
+            {
+                let height = actual.clamp(FLYOUT_MIN_HEIGHT, self.max_height);
+                self.manual_height = Some(height);
+                self.last_height = height;
+                self.dirty_height = true;
+                self.place(&ctx);
+            }
+
+            let target = measured.ceil().clamp(FLYOUT_MIN_HEIGHT, self.max_height);
+            if self.manual_height.is_none() && (target - self.last_height).abs() > 1.5 {
                 self.last_height = target;
                 ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(FLYOUT_OUTER_WIDTH, target)));
+                self.size_settle = 3;
                 self.place(&ctx);
                 ctx.request_repaint();
             }
@@ -391,11 +476,11 @@ impl eframe::App for PiDaTrayApp {
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         crate::ensure_borderless_window_policy(frame);
 
-        // `eframe` 0.37 ignores `ViewportBuilder::with_visible(false)` on first map,
-        // so hide explicitly once on frame 0 until a tray click shows it.
-        if !self.hid_startup_window {
-            self.hid_startup_window = true;
-            ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+        // `eframe` 0.37 keeps a mapped-but-off-screen window warm so showing it
+        // never presents an unpainted swap chain. Park once on the first tick.
+        if !self.startup_parked {
+            self.startup_parked = true;
+            self.park(ctx);
         }
 
         self.sync_tray();

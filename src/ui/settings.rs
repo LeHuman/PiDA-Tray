@@ -27,6 +27,8 @@ pub struct SettingsView {
 #[derive(Default)]
 pub struct SettingsOutcome {
     pub close: bool,
+    /// Restore content-fit flyout height and forget the dragged height.
+    pub reset_size: bool,
 }
 
 fn poll_label(secs: u64) -> String {
@@ -193,8 +195,24 @@ impl SettingsView {
                         });
                     });
 
-                // 3. Cache control
-                ui.horizontal(|ui| {
+                // 3. Cache + window size controls
+                ui.horizontal_wrapped(|ui| {
+                    let reset = egui::Button::new(
+                        RichText::new("Reset flyout size")
+                            .size(11.5)
+                            .color(PALETTE.on_surface_variant),
+                    )
+                    .fill(hover_overlay())
+                    .stroke(Stroke::new(1.0, border_subtle()))
+                    .corner_radius(CornerRadius::same(6));
+                    if ui
+                        .add(reset)
+                        .on_hover_text("Return to a height that fits the device cards")
+                        .clicked()
+                    {
+                        out.reset_size = true;
+                    }
+
                     let btn = egui::Button::new(
                         RichText::new("Clear cached schema & icons")
                             .size(11.5)
