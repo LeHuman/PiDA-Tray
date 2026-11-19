@@ -393,7 +393,11 @@ impl DevicesView {
                         }
 
                         if let Some(action) = header_action {
-                            let width = ui.available_width().clamp(64.0, 180.0);
+                            // Leave breathing room on both sides of the inline
+                            // action instead of letting its fill run edge-to-edge
+                            // between the title and the switch.
+                            ui.add_space(8.0);
+                            let width = (ui.available_width() - 8.0).clamp(64.0, 180.0);
                             action_tile(ui, group, snap, shared, poller, action, width, 28.0);
                         }
                     });
