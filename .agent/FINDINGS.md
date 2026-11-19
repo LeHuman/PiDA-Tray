@@ -23,3 +23,9 @@ Initial scaffold was created offline without a Rust toolchain. During ingestion,
 - **Per-param error revert & active-edit sync lock**: `finish_dispatch_error` rolls back only the failed param via `revert_param`; `refresh_states` and `dispatch` merge via `merge_outputs_preserving_active` so background readbacks never overwrite in-flight or actively dragged controls.
 - **Disambiguated nested titles**: `DeviceGroup.subtitle` displays parent group segments when nested (e.g. `Living Room` under `Lamp`).
 - **Visual alignment**: adopted `#111318` / `#14171D` / `#181B22` dark slate palette, header bottom hairline, and ring+dot tray icon style matching `pigradient-tray`.
+
+## Follow-up UI pass
+- **Branded tray icon states**: `assets/icon.png` is compiled into the executable and resized to 32×32; online keeps the full PiDA colours, offline/unconfigured/unknown is grayscale, and a failed action applies a red tint.
+- **Collapsible cards + aligned controls**: device cards have a chevron disclosure, section labels (`Controls` / `Status` / `Actions`), two-column action tiles, and fixed label/value columns so every slider track is the same length. Slider rails use a dedicated `PALETTE.track` colour instead of blending into the card.
+- **Resizable, monitor-aware flyout**: the window is resizable vertically (width locked), starts at 720 pt / caps at 900 pt or the monitor work area, remembers a user drag in `settings.json`, and offers **Reset flyout size** in Settings.
+- **Mapped-window reveal fix**: hiding with `ViewportCommand::Visible(false)` left eframe 0.37 with a blank swap chain on the next show. The window now stays mapped, is parked at `-32000,-32000`, and is DWM-cloaked while hidden (`main::set_window_cloaked`); show uncloaks and repositions it.

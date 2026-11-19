@@ -12,6 +12,7 @@ defaults, comments, tests, docs, or git history. Use placeholders: `http://192.0
 - `bool` params dispatch real JSON booleans.
 - Only `GET` parameterized endpoints (`set` / `readouts`); never `GET` legacy no-param actions (as `GET` executes them).
 - Hidden-window lifecycle (`tray.sync`, tray action draining, close cancel, focus-loss/Esc) runs in `App::logic`; `App::ui` returns immediately when `!visible`.
+- The window stays mapped and is parked off-screen + DWM-cloaked while hidden. Never hide it with `ViewportCommand::Visible(false)`: eframe 0.37 can then present an unpainted swap chain on the next show.
 - Tray icon/tooltip updates are diff-cached.
 - Pure logic lives in `config`, `api`, `catalog`, `cache`, `poller` helpers, and `tray` placement so it is unit-testable.
 
