@@ -20,9 +20,7 @@ pub const CARD_STROKE_WIDTH: f32 = 1.0;
 pub const CARD_BLEED: f32 = 1.0;
 pub const FLYOUT_OUTER_WIDTH: f32 = FLYOUT_WIDTH + 2.0 * CARD_STROKE_WIDTH + 2.0 * CARD_BLEED;
 pub const FLYOUT_MIN_HEIGHT: f32 = 260.0;
-/// Minimum height accepted on the first open before the content is measured.
-pub const FLYOUT_SHOW_MIN_HEIGHT: f32 = 300.0;
-/// Initial content-hug height before the first frame measures the cards.
+/// Initial panel height; users can drag the flyout edge to change it.
 pub const FLYOUT_DEFAULT_HEIGHT: f32 = 720.0;
 /// Upper bound; the actual cap is also clamped to the monitor work area.
 pub const FLYOUT_MAX_HEIGHT: f32 = 900.0;

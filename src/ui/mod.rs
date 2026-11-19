@@ -17,8 +17,8 @@ use eframe::egui::{
 use crate::{
     constants::{
         CARD_BLEED, CARD_STROKE_WIDTH, FLYOUT_DEFAULT_HEIGHT, FLYOUT_MAX_HEIGHT, FLYOUT_MIN_HEIGHT,
-        FLYOUT_OUTER_WIDTH, FLYOUT_PADDING, FLYOUT_RADIUS, FLYOUT_SCREEN_MARGIN,
-        FLYOUT_SHOW_MIN_HEIGHT, FLYOUT_WIDTH, FOCUS_LOSS_GRACE, PALETTE, PARKED_POS,
+        FLYOUT_OUTER_WIDTH, FLYOUT_PADDING, FLYOUT_RADIUS, FLYOUT_SCREEN_MARGIN, FLYOUT_WIDTH,
+        FOCUS_LOSS_GRACE, PALETTE, PARKED_POS,
     },
     poller::{Command, Connection, Poller, Shared},
     power,
@@ -198,9 +198,7 @@ impl PiDaTrayApp {
         }
 
         let previous_height = self.last_viewport_height;
-        let desired = self
-            .manual_height
-            .unwrap_or(previous_height.max(FLYOUT_SHOW_MIN_HEIGHT));
+        let desired = self.manual_height.unwrap_or(FLYOUT_DEFAULT_HEIGHT);
         let pos = self.compute_placement(ctx, desired);
         let target = desired.clamp(FLYOUT_MIN_HEIGHT, self.max_height);
 
@@ -558,18 +556,13 @@ impl PiDaTrayApp {
             self.place(&ctx, height);
         }
 
-        // Content height (capped by the monitor-aware `max_height`). In manual
-        // mode the user's dragged height wins; otherwise shrink/grow to fit.
-        let content_h = card_response
-            .inner
-            .response
-            .rect
-            .height()
-            .ceil()
-            .max(FLYOUT_MIN_HEIGHT);
+        // Fixed panel height (or the user's dragged height). Measuring the
+        // ScrollArea inside the current window gives the window height back,
+        // not the catalogue's natural height, so content-hugging would let the
+        // flyout shrink once and never grow again when devices load.
         let measured_h = self
             .manual_height
-            .unwrap_or(content_h)
+            .unwrap_or(FLYOUT_DEFAULT_HEIGHT)
             .clamp(FLYOUT_MIN_HEIGHT, self.max_height);
 
         if (measured_h - self.last_viewport_height).abs() > 1.5 {
