@@ -32,8 +32,15 @@ const LABEL_WIDTH: f32 = 92.0;
 const VALUE_WIDTH: f32 = 46.0;
 const ROW_GAP: f32 = 8.0;
 const TILE_GAP: f32 = 8.0;
-const TILE_STRIP_WIDTH: f32 = 26.0;
+const TILE_COLUMNS: usize = 3;
+const TILE_STRIP_WIDTH: f32 = 22.0;
+const LONG_PRESS: Duration = Duration::from_millis(280);
 const CLICK_AWAY_GRACE: Duration = Duration::from_millis(150);
+
+struct PressState {
+    started: Instant,
+    sliding: bool,
+}
 
 struct PendingNumeric {
     value: f64,
@@ -49,6 +56,7 @@ pub struct DevicesView {
     textures: HashMap<String, (usize, Option<TextureHandle>)>,
     pending: HashMap<(String, String), PendingNumeric>,
     string_edits: HashMap<(String, String), String>,
+    press: HashMap<String, PressState>,
     /// At most one tile is expanded; expansion renders full width in place.
     expanded: Option<String>,
     expanded_at: Option<Instant>,
@@ -286,6 +294,7 @@ fn has_more(group: &DeviceGroup) -> bool {
 impl DevicesView {
     pub fn collapse_expanded(&mut self) {
         self.expanded = None;
+        self.press.clear();
     }
 
     pub fn flush_all(&mut self, shared: &Shared, poller: &Poller) {
@@ -307,11 +316,14 @@ impl DevicesView {
             return;
         }
 
-        let tile_w = ((ui.available_width() - TILE_GAP) / 2.0).floor().max(120.0);
+        let tile_w = ((ui.available_width() - TILE_GAP * (TILE_COLUMNS as f32 - 1.0))
+            / TILE_COLUMNS as f32)
+            .floor()
+            .max(88.0);
         // Rows are spaced explicitly; egui's inherited vertical item spacing
         // would otherwise add a trailing gap under the last row.
         ui.spacing_mut().item_spacing.y = 0.0;
-        let mut row: Vec<&DeviceGroup> = Vec::with_capacity(2);
+        let mut row: Vec<&DeviceGroup> = Vec::with_capacity(TILE_COLUMNS);
         let mut expanded_rect = None;
         let mut expand_request = None;
         let mut collapse_request = false;
@@ -336,7 +348,7 @@ impl DevicesView {
                 needs_gap = true;
             } else {
                 row.push(group);
-                if row.len() == 2 {
+                if row.len() == TILE_COLUMNS {
                     if needs_gap {
                         ui.add_space(TILE_GAP);
                     }
@@ -471,47 +483,76 @@ impl DevicesView {
         let body = ui.interact(body_rect, id.with("body"), body_sense);
         let strip =
             strip_rect.map(|strip_rect| ui.interact(strip_rect, id.with("more"), Sense::click()));
-        let radial_rect = (toggle.is_some() && slider.is_some()).then(|| {
-            Rect::from_center_size(
-                pos2(body_rect.right() - 18.0, body_rect.top() + 18.0),
-                vec2(28.0, 28.0),
-            )
-        });
-        let radial = radial_rect
-            .map(|radial_rect| ui.interact(radial_rect, id.with("power"), Sense::click()));
 
         let strip_hovered = strip.as_ref().is_some_and(|response| response.hovered());
-        let radial_hovered = radial.as_ref().is_some_and(|response| response.hovered());
-        if body.hovered() || strip_hovered || radial_hovered {
+        if body.hovered() || strip_hovered {
             ui.ctx()
                 .set_cursor_icon(if slider.is_some() && body.hovered() {
-                    egui::CursorIcon::ResizeHorizontal
+                    egui::CursorIcon::ResizeVertical
                 } else {
                     egui::CursorIcon::PointingHand
                 });
         }
 
+        let slider_value = slider.map(|param| {
+            value_f64(state, &param.name, param.default_value())
+                .clamp(param.min.unwrap(), param.max.unwrap())
+        });
+        let slider_fraction = slider.map(|param| {
+            ((slider_value.unwrap() - param.min.unwrap())
+                / (param.max.unwrap() - param.min.unwrap()))
+            .clamp(0.0, 1.0) as f32
+        });
+
         let painter = ui.painter();
-        let mut bg = if on {
+        let mut bg = if on && slider.is_none() {
             PALETTE
                 .surface_container
                 .blend(PALETTE.primary.gamma_multiply(0.22))
         } else {
             PALETTE.surface_container
         };
-        if body.hovered() || strip_hovered || radial_hovered {
+        if body.hovered() || strip_hovered {
             bg = bg.blend(hover_overlay());
         }
         if body.is_pointer_button_down_on() {
             bg = bg.gamma_multiply(0.90);
         }
         painter.rect_filled(rect, CornerRadius::same(CARD_RADIUS), bg);
+        if let Some(fraction) = slider_fraction
+            && fraction > 0.0
+        {
+            let fill = Rect::from_min_max(
+                pos2(
+                    body_rect.left(),
+                    rect.bottom() - fraction * body_rect.height(),
+                ),
+                body_rect.right_bottom(),
+            );
+            painter.rect_filled(
+                fill,
+                CornerRadius::same(CARD_RADIUS),
+                Color32::from_rgba_unmultiplied(
+                    37,
+                    99,
+                    235,
+                    if toggle.is_some() && !on { 42 } else { 78 },
+                ),
+            );
+        }
+        if toggle.is_some() {
+            painter.circle_filled(
+                pos2(body_rect.right() - 8.0, body_rect.top() + 8.0),
+                3.0,
+                if on { PALETTE.ok } else { PALETTE.outline },
+            );
+        }
         painter.rect_stroke(
             rect,
             CornerRadius::same(CARD_RADIUS),
             Stroke::new(
                 1.0,
-                if body.hovered() || strip_hovered || radial_hovered {
+                if body.hovered() || strip_hovered {
                     PALETTE.focus.gamma_multiply(0.7)
                 } else {
                     border_subtle()
@@ -536,8 +577,8 @@ impl DevicesView {
             );
         }
 
-        let inner = body_rect.shrink(10.0);
-        let icon_rect = Rect::from_min_size(inner.min, vec2(26.0, 26.0));
+        let inner = body_rect.shrink(9.0);
+        let icon_rect = Rect::from_min_size(inner.min, vec2(32.0, 32.0));
         if let Some(texture) = texture {
             painter.image(
                 texture,
@@ -549,22 +590,22 @@ impl DevicesView {
             icons::draw_kind(painter, group.icon, icon_rect.shrink(1.0), PALETTE.focus);
         }
 
-        let text_x = inner.left() + 34.0;
-        let text_right = radial_rect.map_or(body_rect.right() - 8.0, |radial| radial.left() - 4.0);
-        let max_chars = (((text_right - text_x) / 7.0).floor() as usize).max(6);
+        let text_x = inner.left() + 40.0;
+        let text_right = body_rect.right() - if toggle.is_some() { 14.0 } else { 6.0 };
+        let max_chars = (((text_right - text_x) / 6.2).floor() as usize).max(5);
         painter.text(
             pos2(text_x, inner.top()),
             Align2::LEFT_TOP,
             fit_text(&group.title, max_chars),
-            FontId::proportional(12.5),
+            FontId::proportional(11.5),
             Color32::WHITE,
         );
         if let Some(subtitle) = &group.subtitle {
             painter.text(
-                pos2(text_x, inner.top() + 16.0),
+                pos2(text_x, inner.top() + 15.0),
                 Align2::LEFT_TOP,
-                fit_text(subtitle, max_chars + 4),
-                FontId::proportional(9.5),
+                fit_text(subtitle, max_chars + 2),
+                FontId::proportional(8.5),
                 PALETTE.muted,
             );
         }
@@ -572,28 +613,8 @@ impl DevicesView {
         let mut value_text = None;
         let mut value_label = None;
         if let Some(param) = slider {
-            let value = value_f64(state, &param.name, param.default_value())
-                .clamp(param.min.unwrap(), param.max.unwrap());
-            let fraction = ((value - param.min.unwrap())
-                / (param.max.unwrap() - param.min.unwrap()))
-            .clamp(0.0, 1.0) as f32;
-            let track = Rect::from_min_max(
-                pos2(inner.left(), rect.bottom() - 16.0),
-                pos2(inner.right(), rect.bottom() - 10.0),
-            );
-            painter.rect_filled(track, 3.0, PALETTE.track);
-            if fraction > 0.0 {
-                painter.rect_filled(
-                    Rect::from_min_max(
-                        track.left_top(),
-                        pos2(track.left() + track.width() * fraction, track.bottom()),
-                    ),
-                    3.0,
-                    PALETTE.primary,
-                );
-            }
             value_label = Some(prettify(&param.name));
-            value_text = Some(format_number(value, param.is_int));
+            value_text = Some(format_number(slider_value.unwrap(), param.is_int));
         } else if let Some(toggle) = toggle {
             value_label = Some(prettify(toggle));
             value_text = Some(if on { "On".into() } else { "Off".into() });
@@ -610,56 +631,37 @@ impl DevicesView {
             value_text = Some(value);
         }
         if let Some(label) = value_label {
+            let label_y = if slider.is_some() || value_text.is_none() {
+                rect.bottom() - 23.0
+            } else {
+                rect.bottom() - 37.0
+            };
             painter.text(
-                pos2(inner.left(), rect.bottom() - 37.0),
-                Align2::LEFT_TOP,
-                fit_text(&label, 20),
-                FontId::proportional(9.5),
+                pos2(inner.left(), label_y),
+                Align2::LEFT_BOTTOM,
+                fit_text(&label, max_chars + 2),
+                FontId::proportional(9.0),
                 PALETTE.muted,
             );
         }
         if let Some(value) = value_text {
-            painter.text(
-                pos2(inner.left(), rect.bottom() - 28.0),
-                Align2::LEFT_TOP,
-                value,
-                FontId::proportional(17.0),
-                Color32::WHITE,
-            );
-        }
-
-        if let Some(radial_rect) = radial_rect {
-            let value = on;
-            painter.circle_filled(
-                radial_rect.center(),
-                13.0,
-                if value {
-                    PALETTE.primary
-                } else {
-                    PALETTE.surface_container_high
-                },
-            );
-            painter.circle_stroke(
-                radial_rect.center(),
-                13.0,
-                Stroke::new(
-                    if radial_hovered { 1.5 } else { 1.0 },
-                    if radial_hovered || value {
-                        PALETTE.focus
-                    } else {
-                        PALETTE.outline
-                    },
-                ),
-            );
-            icons::power(
-                painter,
-                radial_rect.shrink(8.0),
-                if value {
-                    Color32::WHITE
-                } else {
-                    PALETTE.on_surface_variant
-                },
-            );
+            if slider.is_some() {
+                painter.text(
+                    pos2(inner.right(), rect.bottom() - 23.0),
+                    Align2::RIGHT_BOTTOM,
+                    value,
+                    FontId::proportional(10.5),
+                    PALETTE.on_surface_variant,
+                );
+            } else {
+                painter.text(
+                    pos2(inner.left(), rect.bottom() - 23.0),
+                    Align2::LEFT_BOTTOM,
+                    value,
+                    FontId::proportional(15.0),
+                    Color32::WHITE,
+                );
+            }
         }
 
         if let Some(strip_rect) = strip_rect {
@@ -671,66 +673,82 @@ impl DevicesView {
             icons::chevron(
                 painter,
                 Rect::from_center_size(
-                    pos2(strip_rect.center().x, strip_rect.top() + 16.0),
-                    vec2(12.0, 12.0),
+                    pos2(strip_rect.center().x, strip_rect.top() + 14.0),
+                    vec2(11.0, 11.0),
                 ),
                 color,
                 false,
             );
         }
 
-        let over_radial = radial
-            .as_ref()
-            .is_some_and(|response| response.clicked() || response.hovered());
         if let Some(strip) = strip
             && strip.clicked()
         {
             *expand_request = Some(group.path.clone());
         }
-        if let Some(radial) = radial
-            && radial.clicked()
-            && let Some(set) = &group.set
-            && let Some(toggle) = &set.toggle_param
-        {
-            play(shared, UiSound::Toggle);
-            poller.set_param(
-                shared,
-                &group.path,
-                &set.action_path,
-                &set.required_inputs,
-                toggle,
-                json!(!on),
-            );
-        }
 
         if let Some(param) = slider {
-            if !over_radial && (body.dragged() || body.clicked()) {
-                if let Some(position) = body.interact_pointer_pos() {
-                    let fraction =
-                        ((position.x - inner.left()) / inner.width()).clamp(0.0, 1.0) as f64;
-                    let value =
-                        param.min.unwrap() + fraction * (param.max.unwrap() - param.min.unwrap());
-                    let key = self.queue_numeric(
-                        group,
-                        group.set.as_ref().unwrap(),
-                        param,
-                        value,
-                        shared,
-                    );
-                    if body.drag_stopped() || body.clicked() {
-                        self.flush_key(&key, shared, poller);
-                        play(shared, UiSound::Action);
-                    }
+            let set = group.set.as_ref().unwrap();
+            let now = Instant::now();
+            let mut press_value = None;
+            let mut released_sliding = false;
+
+            if body.is_pointer_button_down_on() {
+                let state = self.press.entry(group.path.clone()).or_insert(PressState {
+                    started: now,
+                    sliding: false,
+                });
+                let held = now.duration_since(state.started) >= LONG_PRESS;
+                if body.dragged() || held {
+                    state.sliding = true;
                 }
-            } else if !over_radial && body.drag_stopped() {
-                let key = (
-                    group.set.as_ref().unwrap().action_path.clone(),
-                    param.name.clone(),
-                );
+                if state.sliding {
+                    if let Some(position) = body.interact_pointer_pos() {
+                        let fraction = ((body_rect.bottom() - position.y) / body_rect.height())
+                            .clamp(0.0, 1.0) as f64;
+                        press_value = Some(
+                            param.min.unwrap()
+                                + fraction * (param.max.unwrap() - param.min.unwrap()),
+                        );
+                    }
+                } else {
+                    let remaining = LONG_PRESS.saturating_sub(now.duration_since(state.started));
+                    ui.ctx().request_repaint_after(remaining);
+                }
+            } else if let Some(state) = self.press.remove(&group.path) {
+                released_sliding = state.sliding;
+            }
+
+            let mut pending_key = None;
+            if let Some(value) = press_value {
+                pending_key = Some(self.queue_numeric(group, set, param, value, shared));
+            }
+            if released_sliding {
+                let key = pending_key.unwrap_or((set.action_path.clone(), param.name.clone()));
                 self.flush_key(&key, shared, poller);
                 play(shared, UiSound::Action);
+            } else if body.clicked() {
+                if let Some(toggle) = toggle {
+                    play(shared, UiSound::Toggle);
+                    poller.set_param(
+                        shared,
+                        &group.path,
+                        &set.action_path,
+                        &set.required_inputs,
+                        toggle,
+                        json!(!on),
+                    );
+                } else if let Some(position) = body.interact_pointer_pos() {
+                    let fraction = ((body_rect.bottom() - position.y) / body_rect.height())
+                        .clamp(0.0, 1.0) as f64;
+                    let value =
+                        param.min.unwrap() + fraction * (param.max.unwrap() - param.min.unwrap());
+                    let key = self.queue_numeric(group, set, param, value, shared);
+                    self.flush_key(&key, shared, poller);
+                    play(shared, UiSound::Action);
+                }
             }
-        } else if !over_radial && body.clicked() {
+        } else if body.clicked() {
             if let (Some(set), Some(toggle)) = (&group.set, toggle) {
                 play(shared, UiSound::Toggle);
                 poller.set_param(

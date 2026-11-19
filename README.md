@@ -33,7 +33,7 @@ Desktop access to server-managed home automation devices should not require keep
 - Tray icon uses the PiDA mark: full colour while connected, grayscale when offline or unconfigured, and red after a failed action.
 - Device cards use a server-provided `/api/icon/<endpoint>` PNG when available; otherwise a broad category fallback infers a generic icon from device terms (lighting, fan, display, computer, audio, sensor, camera, lock, cover, power, or a neutral generic device).
 - Schema-driven controls preserving server YAML key order: boolean toggles, bounded sliders, numeric steppers, enum pills/dropdowns, string inputs, read-only state readouts, and legacy one-shot action buttons.
-- Two-column grid of square device tiles. A single-toggle tile toggles from the whole card; a toggle+slider tile has a radial power button and the card body sets the first slider; cards with more options expose a right-side disclosure strip.
+- Compact three-column grid of square device tiles. A single-toggle tile toggles from the whole card; a toggle+slider tile uses the whole card for tap-to-toggle and press/hold-or-drag to set the first slider, whose value fills the card from the bottom.
 - Expanding a tile shows the full-width card with every control, status value, and action; clicking outside collapses it. Expanded cards also expose ↑/↓ device-reorder controls.
 - Reorder devices with the ↑/↓ controls in an expanded card. Order is saved by schema path, new devices append, and missing devices keep their slot and cached state so a transient schema omission does not lose their configuration.
 - Subtle synthesized UI ticks for toggles, actions, and expansion; can be disabled with **Settings → Subtle UI sounds**.
