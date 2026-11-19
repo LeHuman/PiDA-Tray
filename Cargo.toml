@@ -10,7 +10,7 @@ publish = false
 
 [dependencies]
 eframe = { version = "0.37", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow"] }
-tray-icon = "0.21"
+tray-icon = "0.26"
 single-instance = "0.3"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
 reqwest = { version = "0.12", default-features = false, features = ["native-tls", "json"] }
