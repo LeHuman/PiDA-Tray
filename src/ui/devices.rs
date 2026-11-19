@@ -308,6 +308,16 @@ impl DevicesView {
         let state = snap.states.get(&group.path);
         let tex = self.texture_for(ui.ctx(), snap, &group.path);
         let expanded = self.expanded.contains(&group.path);
+        let header_action = if !expanded
+            && group.set.as_ref().is_none_or(|set| {
+                set.range_params.is_empty()
+                    && set.enum_params.is_empty()
+                    && set.string_params.is_empty()
+            }) {
+            group.legacy.first()
+        } else {
+            None
+        };
         let mut toggle_collapse = false;
 
         egui::Frame::new()
@@ -381,11 +391,16 @@ impl DevicesView {
                                 );
                             }
                         }
+
+                        if let Some(action) = header_action {
+                            let width = ui.available_width().clamp(64.0, 180.0);
+                            action_tile(ui, group, snap, shared, poller, action, width, 28.0);
+                        }
                     });
                 });
 
                 if !expanded {
-                    self.first_control(ui, group, snap, state, shared, poller);
+                    self.first_control(ui, group, state, shared, poller);
                     return;
                 }
 
@@ -442,7 +457,6 @@ impl DevicesView {
         &mut self,
         ui: &mut Ui,
         group: &DeviceGroup,
-        snap: &Snapshot,
         state: Option<&StateMap>,
         shared: &Arc<Shared>,
         poller: &Poller,
@@ -458,12 +472,7 @@ impl DevicesView {
             }
             if let Some(name) = set.string_params.first() {
                 self.string_control(ui, group, set, name, state, shared, poller);
-                return;
             }
-        }
-        if let Some(action) = group.legacy.first() {
-            let width = ui.available_width();
-            action_tile(ui, group, snap, shared, poller, action, width, 34.0);
         }
     }
 
