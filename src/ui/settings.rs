@@ -22,6 +22,7 @@ pub struct SettingsView {
     idle_poll_seconds: u64,
     pin_flyout: bool,
     launch_at_startup: bool,
+    ui_sounds: bool,
     error: Option<String>,
     loaded: bool,
 }
@@ -73,6 +74,7 @@ impl SettingsView {
             s.settings.idle_poll_seconds = self.idle_poll_seconds;
             s.settings.pin_flyout = self.pin_flyout;
             s.settings.launch_at_startup = self.launch_at_startup;
+            s.settings.ui_sounds = self.ui_sounds;
         });
         shared.save_settings();
         poller.send(Command::SettingsChanged);
@@ -90,6 +92,7 @@ impl SettingsView {
             self.idle_poll_seconds = current.idle_poll_seconds;
             self.pin_flyout = current.pin_flyout;
             self.launch_at_startup = current.launch_at_startup;
+            self.ui_sounds = current.ui_sounds;
             self.loaded = true;
         }
 
@@ -211,6 +214,18 @@ impl SettingsView {
                             );
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 ui.checkbox(&mut self.launch_at_startup, "");
+                            });
+                        });
+
+                        ui.horizontal(|ui| {
+                            ui.set_width(FLYOUT_WIDTH - 44.0);
+                            ui.label(
+                                RichText::new("Subtle UI sounds")
+                                    .size(12.0)
+                                    .color(PALETTE.on_surface),
+                            );
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.checkbox(&mut self.ui_sounds, "");
                             });
                         });
                     });

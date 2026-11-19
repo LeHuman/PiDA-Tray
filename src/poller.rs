@@ -20,7 +20,7 @@ use tokio::{sync::mpsc, task::JoinSet};
 use crate::{
     api::{ApiError, PidaClient, Schema},
     cache::{CacheData, icon_file, icons_dir},
-    catalog::{DeviceGroup, build_catalog},
+    catalog::{DeviceGroup, apply_saved_order, build_catalog},
     config::{Settings, normalize_server_url},
 };
 
@@ -94,9 +94,14 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 
 impl Shared {
     pub fn new(dir: PathBuf) -> Arc<Self> {
-        let settings = Settings::load(&dir);
+        let mut settings = Settings::load(&dir);
         let cache = CacheData::load(&dir);
-        let catalog = cache.schema.as_ref().map(build_catalog).unwrap_or_default();
+        let mut catalog = cache.schema.as_ref().map(build_catalog).unwrap_or_default();
+        let merged = apply_saved_order(&mut catalog, &settings.device_order);
+        if merged != settings.device_order {
+            settings.device_order = merged;
+            let _ = settings.save(&dir);
+        }
 
         // Cache-first: pull any icons already on disk so the first paint has them.
         let mut icons = HashMap::new();
@@ -160,6 +165,42 @@ impl Shared {
 
     fn settle_is_current(&self, generation: u64) -> bool {
         self.settle_generation.load(Ordering::SeqCst) == generation
+    }
+
+    /// Move a visible device one slot earlier/later in the saved order.
+    pub fn move_device(&self, path: &str, delta: isize) -> bool {
+        let (mut order, visible) = self.read(|s| {
+            (
+                s.settings.device_order.clone(),
+                s.catalog
+                    .iter()
+                    .map(|group| group.path.clone())
+                    .collect::<Vec<_>>(),
+            )
+        });
+        let Some(position) = visible.iter().position(|candidate| candidate == path) else {
+            return false;
+        };
+        let target = position as isize + delta;
+        if target < 0 || target >= visible.len() as isize {
+            return false;
+        }
+        let other = &visible[target as usize];
+        let (Some(a), Some(b)) = (
+            order.iter().position(|candidate| candidate == path),
+            order.iter().position(|candidate| candidate == other),
+        ) else {
+            return false;
+        };
+        order.swap(a, b);
+        self.update(|s| {
+            s.settings.device_order = order.clone();
+            let mut catalog = (*s.catalog).clone();
+            apply_saved_order(&mut catalog, &order);
+            s.catalog = Arc::new(catalog);
+        });
+        self.save_settings();
+        true
     }
 
     fn request_repaint(&self) {
@@ -535,16 +576,18 @@ async fn sync(client: PidaClient, shared: Arc<Shared>) {
 }
 
 fn apply_schema(shared: &Shared, schema: Schema) {
+    let order = shared.read(|s| s.settings.device_order.clone());
+    let mut catalog = build_catalog(&schema);
+    let merged = apply_saved_order(&mut catalog, &order);
     shared.update(|s| {
-        // Only a fresh, successful schema is allowed to evict cached groups.
-        s.cache.prune_to(&schema);
-        let catalog = build_catalog(&schema);
-        let live: HashSet<&str> = catalog.iter().map(|g| g.path.as_str()).collect();
-        s.states.retain(|k, _| live.contains(k.as_str()));
+        // Keep cached state for groups that are temporarily absent: the saved
+        // order retains their slot, and a later sync updates the stale state.
+        s.settings.device_order = merged;
         s.cache.schema = Some(schema);
         s.catalog = Arc::new(catalog);
         s.banner = None;
     });
+    shared.save_settings();
     shared.save_cache();
 }
 

@@ -1,7 +1,7 @@
 //! Disk cache: last schema + last-confirmed group states, and PNG icons.
 
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::BTreeMap,
     path::{Path, PathBuf},
 };
 
@@ -64,12 +64,6 @@ impl CacheData {
         std::fs::write(&tmp, json)?;
         std::fs::rename(tmp, path)
     }
-
-    /// Drop cached state for groups a *fresh* schema no longer contains.
-    pub fn prune_to(&mut self, fresh: &Schema) {
-        let live: HashSet<&str> = fresh.groups.iter().map(|(k, _)| k.as_str()).collect();
-        self.group_states.retain(|k, _| live.contains(k.as_str()));
-    }
 }
 
 #[cfg(test)]
@@ -115,15 +109,6 @@ mod tests {
             CacheData::load(&dir.path().join("missing")),
             CacheData::default()
         );
-    }
-
-    #[test]
-    fn prunes_only_groups_missing_from_fresh_schema() {
-        let mut c = sample();
-        let fresh = c.schema.clone().unwrap();
-        c.prune_to(&fresh);
-        assert!(c.group_states.contains_key("b"));
-        assert!(!c.group_states.contains_key("gone"));
     }
 
     #[test]

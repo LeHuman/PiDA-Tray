@@ -24,6 +24,7 @@ use crate::{
     },
     constants::{CARD_RADIUS, PALETTE, SLIDER_DEBOUNCE},
     poller::{Poller, Shared, Snapshot, StateMap},
+    sound::{self, UiSound},
     theme::{border_subtle, hover_overlay},
 };
 
@@ -119,6 +120,29 @@ fn switch(ui: &mut Ui, on: bool, busy: bool) -> bool {
         ui.ctx().request_repaint();
     }
     resp.clicked()
+}
+
+fn play(shared: &Shared, effect: UiSound) {
+    if shared.settings().ui_sounds {
+        sound::play(effect);
+    }
+}
+
+fn move_button(ui: &mut Ui, up: bool) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::click());
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(11), hover_overlay());
+    }
+    let color = if resp.hovered() {
+        Color32::WHITE
+    } else {
+        PALETTE.on_surface_variant
+    };
+    icons::chevron(ui.painter(), rect.shrink(6.0), color, up);
+    resp.on_hover_text(if up { "Move earlier" } else { "Move later" })
+        .clicked()
 }
 
 fn chevron_button(ui: &mut Ui, expanded: bool) -> bool {
@@ -381,6 +405,7 @@ impl DevicesView {
                                 .contains(&format!("{}:{toggle}", set.action_path));
                             if switch(ui, on, busy) {
                                 // Real JSON boolean, never 1/0 or "true".
+                                play(shared, UiSound::Toggle);
                                 poller.set_param(
                                     shared,
                                     &group.path,
@@ -389,6 +414,17 @@ impl DevicesView {
                                     toggle,
                                     json!(!on),
                                 );
+                            }
+                        }
+
+                        if expanded {
+                            if move_button(ui, false) {
+                                play(shared, UiSound::Action);
+                                shared.move_device(&group.path, 1);
+                            }
+                            if move_button(ui, true) {
+                                play(shared, UiSound::Action);
+                                shared.move_device(&group.path, -1);
                             }
                         }
 
@@ -447,6 +483,14 @@ impl DevicesView {
                 }
             });
         if toggle_collapse {
+            play(
+                shared,
+                if expanded {
+                    UiSound::Close
+                } else {
+                    UiSound::Open
+                },
+            );
             if expanded {
                 self.expanded.remove(&group.path);
             } else {
@@ -657,6 +701,7 @@ impl DevicesView {
                 egui::TextEdit::singleline(buf).hint_text("value"),
             );
             if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                play(shared, UiSound::Action);
                 poller.set_param(
                     shared,
                     &group.path,
@@ -702,6 +747,7 @@ fn action_tile(
         .inner
         .on_hover_text(&action.action_path);
     if resp.clicked() {
+        play(shared, UiSound::Action);
         poller.press(shared, &group.path, &action.action_path);
     }
 }
@@ -782,6 +828,7 @@ fn enum_control(
                         .clicked()
                             && !selected
                         {
+                            play(shared, UiSound::Action);
                             poller.set_param(
                                 shared,
                                 &group.path,
@@ -812,6 +859,7 @@ fn enum_control(
                                 if ui.selectable_label(selected, option_label(opt)).clicked()
                                     && !selected
                                 {
+                                    play(shared, UiSound::Action);
                                     poller.set_param(
                                         shared,
                                         &group.path,

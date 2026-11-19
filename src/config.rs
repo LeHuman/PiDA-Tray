@@ -18,6 +18,17 @@ pub struct Settings {
     /// `Some` when the user dragged the flyout to a custom height.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub flyout_height: Option<f32>,
+    /// Subtle synthesized UI ticks for actions and expansion.
+    #[serde(default = "default_true")]
+    pub ui_sounds: bool,
+    /// Saved card order by schema group path. Missing paths are retained so a
+    /// device keeps its slot if it disappears and comes back.
+    #[serde(default)]
+    pub device_order: Vec<String>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -28,6 +39,8 @@ impl Default for Settings {
             pin_flyout: false,
             launch_at_startup: false,
             flyout_height: None,
+            ui_sounds: true,
+            device_order: Vec::new(),
         }
     }
 }
@@ -251,6 +264,8 @@ mod tests {
         assert!(s.pin_flyout);
         assert_eq!(s.idle_poll_seconds, 60);
         assert!(s.server_url.is_empty());
+        assert!(s.ui_sounds);
+        assert!(s.device_order.is_empty());
     }
 
     #[test]
@@ -262,6 +277,8 @@ mod tests {
             pin_flyout: true,
             launch_at_startup: false,
             flyout_height: Some(700.0),
+            ui_sounds: true,
+            device_order: Vec::new(),
         };
         s.save(dir.path()).unwrap();
         assert_eq!(Settings::load(dir.path()), s);

@@ -9,6 +9,7 @@ mod config;
 mod constants;
 mod poller;
 mod power;
+mod sound;
 mod theme;
 mod tray;
 mod ui;
@@ -76,8 +77,8 @@ fn main() -> eframe::Result<()> {
         Box::new(move |cc| Ok(Box::new(ui::PiDaTrayApp::new(cc, shared, poller_handle)))),
     );
 
-    drop(runtime);
     drop(instance);
+    runtime.shutdown_background();
     result
 }
 

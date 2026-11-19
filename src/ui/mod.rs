@@ -271,7 +271,7 @@ impl PiDaTrayApp {
                     let just_blurred = self
                         .hidden_by_blur_at
                         .take()
-                        .is_some_and(|t| t.elapsed() < Duration::from_millis(200));
+                        .is_some_and(|t| t.elapsed() < FOCUS_LOSS_GRACE);
                     if self.visible || just_blurred {
                         // Clicking the tray icon while open triggers taskbar focus
                         // loss on mouse-down; consume the matching mouse-up so the

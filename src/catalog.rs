@@ -112,6 +112,26 @@ impl DeviceGroup {
     }
 }
 
+/// Merge a saved path order with the current catalogue. Existing saved paths
+/// (including devices temporarily absent from the schema) are retained at their
+/// slots; newly discovered devices are appended in schema order.
+pub fn apply_saved_order(groups: &mut [DeviceGroup], order: &[String]) -> Vec<String> {
+    let mut merged = order.to_vec();
+    for group in groups.iter() {
+        if !merged.iter().any(|path| path == &group.path) {
+            merged.push(group.path.clone());
+        }
+    }
+    let rank = |path: &str| {
+        merged
+            .iter()
+            .position(|candidate| candidate == path)
+            .unwrap_or(usize::MAX)
+    };
+    groups.sort_by_key(|group| rank(&group.path));
+    merged
+}
+
 /// `"night_light"` -> `"Night Light"`.
 pub fn prettify(name: &str) -> String {
     name.split('_')
@@ -515,6 +535,23 @@ mod tests {
         assert!(cat[0].subtitle.is_none());
         assert_eq!(cat[0].legacy[0].action_path, "ping");
         assert_eq!(cat.len(), 2);
+    }
+
+    #[test]
+    fn saved_order_survives_additions_and_temporary_removals() {
+        let s = schema(
+            r#"{"groups": {
+              "a": {"actions": {"set": {"params": {"power": {"type": "bool"}}, "inputs": ["power"]}}},
+              "b": {"actions": {"set": {"params": {"power": {"type": "bool"}}, "inputs": ["power"]}}},
+              "c": {"actions": {"set": {"params": {"power": {"type": "bool"}}, "inputs": ["power"]}}}
+            }}"#,
+        );
+        let mut groups = build_catalog(&s);
+        let saved = vec!["gone".to_owned(), "c".to_owned(), "a".to_owned()];
+        let merged = apply_saved_order(&mut groups, &saved);
+        let paths: Vec<_> = groups.iter().map(|g| g.path.as_str()).collect();
+        assert_eq!(paths, ["c", "a", "b"]);
+        assert_eq!(merged, ["gone", "c", "a", "b"]);
     }
 
     #[test]
