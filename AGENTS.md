@@ -17,6 +17,8 @@ defaults, comments, tests, docs, or git history. Use placeholders: `http://192.0
 - Tray mouse-down hides an open flyout and suppresses the matching mouse-up so it does not bounce back open.
 - Every successful dispatch starts the Android-style settle cascade (`schedule_settle`): refresh all group states at +0.5/1/3/8 s, last action wins.
 - Device cards are collapsed by default (`DevicesView::expanded`). Collapsed cards render their first numeric/enum/string control on a second line; a first legacy action renders inline in the header between the title and the switch/chevron.
+- Device order is saved by path in `Settings::device_order`; new paths append, and missing paths/state are retained so devices return to their slot after transient schema omissions or re-additions.
+- UI sound effects go through `sound::play` only when `Settings::ui_sounds` is enabled.
 - Use `ui::button::pill_button` for custom buttons; do not use explicit `.fill()` on `egui::Button` or hover feedback is lost.
 - Device icons: a server PNG from `/api/icon/<endpoint>` always wins. The local fallback must stay generic and privacy-neutral — broad device-category terms only, never personal rooms/devices.
 - Sync `InputState::focused` from `flyout_has_foreground` so egui draws the text caret and focus rings correctly.

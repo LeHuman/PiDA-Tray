@@ -34,6 +34,8 @@ Desktop access to server-managed home automation devices should not require keep
 - Device cards use a server-provided `/api/icon/<endpoint>` PNG when available; otherwise a broad category fallback infers a generic icon from device terms (lighting, fan, display, computer, audio, sensor, camera, lock, cover, power, or a neutral generic device).
 - Schema-driven controls preserving server YAML key order: boolean toggles, bounded sliders, numeric steppers, enum pills/dropdowns, string inputs, read-only state readouts, and legacy one-shot action buttons.
 - Collapsible device cards keep large catalogs compact; every card starts collapsed with its first control still visible (button actions render inline in the card header, sliders/steppers/enums/strings on a second line), and the flyout shrinks/grows to fit. Drag the top or bottom edge to resize (height is remembered).
+- Reorder devices with the ↑/↓ controls in an expanded card. Order is saved by schema path, new devices append, and missing devices keep their slot and cached state so a transient schema omission does not lose their configuration.
+- Subtle synthesized UI ticks for toggles, actions, and expansion; can be disabled with **Settings → Subtle UI sounds**.
 - Taskbar-anchored dark flyout with focus-loss auto-hide, pin toggle, and optional Windows startup registration (`HKCU\...\Run`).
 - Mapped, pre-painted flyout with a one-tick reveal: no white flash or resize jump when opening, and no unpainted swap chain after hiding.
 
