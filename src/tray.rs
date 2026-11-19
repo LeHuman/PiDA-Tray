@@ -1,6 +1,6 @@
 //! Tray icon (in-memory RGBA), tooltip, context menu, and flyout placement.
 
-use std::sync::mpsc::Sender;
+use std::sync::{OnceLock, mpsc::Sender};
 
 use tray_icon::{
     Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
@@ -33,15 +33,6 @@ impl StatusKey {
             (Connection::Online, true) => Self::Error,
             (Connection::Online, false) => Self::Online,
             (Connection::Unknown, _) => Self::Unknown,
-        }
-    }
-
-    fn rgb(self) -> [u8; 3] {
-        match self {
-            Self::Online => [0x10, 0xB9, 0x81],
-            Self::Offline => [0xF8, 0x71, 0x71],
-            Self::Error => [0xF5, 0x9E, 0x0B],
-            Self::Unconfigured | Self::Unknown => [0x64, 0x74, 0x8B],
         }
     }
 
@@ -79,46 +70,58 @@ pub fn clamp_tooltip(s: &str, max_chars: usize) -> String {
     out
 }
 
-/// 32x32 RGBA: dark slate bezel (`#181B22`) with an anti-aliased outer status
-/// ring and bright center status dot (matches sibling tray style).
+/// 32x32 RGBA of the bundled PiDA mark, tinted by connection state:
+/// full colour online, grayscale when unreachable/unconfigured, red after a
+/// failed action.
 pub fn render_icon_rgba(key: StatusKey) -> Vec<u8> {
-    let n = TRAY_ICON_SIZE as usize;
-    let mut px = vec![0u8; n * n * 4];
-    let [ar, ag, ab] = key.rgb();
-    let cx = (n as f32 - 1.0) * 0.5;
-    let cy = (n as f32 - 1.0) * 0.5;
-    let outer_r = n as f32 * 0.453; // ~14.5 at 32px
-    let ring_inner = n as f32 * 0.331; // ~10.6
-    let dot_r = n as f32 * 0.1625; // ~5.2
-
-    for y in 0..n {
-        for x in 0..n {
-            let dx = x as f32 - cx;
-            let dy = y as f32 - cy;
-            let dist = (dx * dx + dy * dy).sqrt();
-            if dist <= outer_r {
-                let edge_alpha = ((outer_r - dist).clamp(0.0, 1.0) * 255.0) as u8;
-                let idx = (y * n + x) * 4;
-                if dist >= ring_inner {
-                    px[idx] = ar;
-                    px[idx + 1] = ag;
-                    px[idx + 2] = ab;
-                    px[idx + 3] = edge_alpha;
-                } else if dist <= dot_r {
-                    px[idx] = ar;
-                    px[idx + 1] = ag;
-                    px[idx + 2] = ab;
-                    px[idx + 3] = 255;
-                } else {
-                    px[idx] = 0x18;
-                    px[idx + 1] = 0x1B;
-                    px[idx + 2] = 0x22;
-                    px[idx + 3] = 255;
-                }
-            }
+    let mut px = base_icon_rgba().to_vec();
+    match key {
+        StatusKey::Online => {}
+        StatusKey::Offline | StatusKey::Unconfigured | StatusKey::Unknown => {
+            grayscale(&mut px);
         }
+        StatusKey::Error => red_tint(&mut px),
     }
     px
+}
+
+/// Decode + downscale `assets/icon.png` once. The icon is compiled into the exe.
+fn base_icon_rgba() -> &'static [u8] {
+    static ICON: OnceLock<Vec<u8>> = OnceLock::new();
+    ICON.get_or_init(|| {
+        let img = image::load_from_memory(include_bytes!("../assets/icon.png"))
+            .expect("bundled assets/icon.png must be a valid PNG")
+            .to_rgba8();
+        image::imageops::resize(
+            &img,
+            TRAY_ICON_SIZE,
+            TRAY_ICON_SIZE,
+            image::imageops::FilterType::Lanczos3,
+        )
+        .into_raw()
+    })
+}
+
+fn luminance(r: u8, g: u8, b: u8) -> u8 {
+    (0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32).round() as u8
+}
+
+fn grayscale(px: &mut [u8]) {
+    for p in px.as_chunks_mut::<4>().0 {
+        let l = luminance(p[0], p[1], p[2]);
+        p[0] = l;
+        p[1] = l;
+        p[2] = l;
+    }
+}
+
+fn red_tint(px: &mut [u8]) {
+    for p in px.as_chunks_mut::<4>().0 {
+        let l = luminance(p[0], p[1], p[2]) as f32 / 255.0;
+        p[0] = (48.0 + 207.0 * l).min(255.0) as u8;
+        p[1] = (8.0 + 48.0 * l).min(255.0) as u8;
+        p[2] = (12.0 + 52.0 * l).min(255.0) as u8;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -401,18 +404,43 @@ mod tests {
     }
 
     #[test]
-    fn icon_buffer_is_32x32_rgba_with_transparent_corners() {
-        let px = render_icon_rgba(StatusKey::Online);
-        assert_eq!(px.len(), 32 * 32 * 4);
-        assert_eq!(px[3], 0, "corner pixel should be transparent");
-        let centre = (16 * 32 + 16) * 4;
-        assert_eq!(&px[centre..centre + 4], &[0x10, 0xB9, 0x81, 255]);
-        let bezel = (8 * 32 + 16) * 4;
-        assert_eq!(&px[bezel..bezel + 4], &[0x18, 0x1B, 0x22, 255]);
-        assert_ne!(
-            render_icon_rgba(StatusKey::Online),
-            render_icon_rgba(StatusKey::Offline)
+    fn icon_uses_brand_asset_and_state_tints() {
+        let online = render_icon_rgba(StatusKey::Online);
+        assert_eq!(online.len(), 32 * 32 * 4);
+        assert_eq!(online[3], 0, "corner pixel should be transparent");
+        assert!(
+            online
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|p| p[3] > 200 && (p[0] != p[1] || p[1] != p[2])),
+            "the online icon should keep the brand colours"
         );
+
+        let offline = render_icon_rgba(StatusKey::Offline);
+        assert!(
+            offline
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|p| p[3] > 200)
+                .all(|p| p[0] == p[1] && p[1] == p[2]),
+            "offline icon should be grayscale"
+        );
+
+        let failed = render_icon_rgba(StatusKey::Error);
+        assert!(
+            failed
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|p| p[3] > 200)
+                .all(|p| p[0] >= p[1] && p[0] >= p[2]),
+            "error icon should be red-tinted"
+        );
+
+        assert_ne!(online, offline);
+        assert_ne!(online, failed);
     }
 
     #[test]
