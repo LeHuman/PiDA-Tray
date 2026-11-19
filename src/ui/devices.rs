@@ -678,17 +678,34 @@ impl DevicesView {
             );
         }
         if let Some(value) = value_text {
-            painter.text(
-                pos2(inner.right(), inner.bottom()),
-                Align2::RIGHT_BOTTOM,
-                fit_text(&value, bottom_chars.min(7)),
-                FontId::proportional(11.0),
-                if value_strong {
-                    Color32::WHITE
-                } else {
-                    PALETTE.on_surface_variant
-                },
-            );
+            // Toggle-only cards are a whole-card switch, so their state is the
+            // primary readout: bottom-left and larger. Slider/readout values
+            // stay small and right-aligned so the fill remains the main hint.
+            if toggle.is_some() && slider.is_none() {
+                painter.text(
+                    pos2(inner.left(), inner.bottom()),
+                    Align2::LEFT_BOTTOM,
+                    fit_text(&value, bottom_chars.min(8)),
+                    FontId::proportional(15.0),
+                    if on {
+                        Color32::WHITE
+                    } else {
+                        PALETTE.on_surface_variant
+                    },
+                );
+            } else {
+                painter.text(
+                    pos2(inner.right(), inner.bottom()),
+                    Align2::RIGHT_BOTTOM,
+                    fit_text(&value, bottom_chars.min(7)),
+                    FontId::proportional(11.0),
+                    if value_strong {
+                        Color32::WHITE
+                    } else {
+                        PALETTE.on_surface_variant
+                    },
+                );
+            }
         }
 
         if let Some(strip_rect) = strip_rect {
