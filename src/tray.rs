@@ -265,7 +265,9 @@ pub fn cursor_pos() -> Option<(f32, f32)> {
 
 #[derive(Debug, Clone, Copy)]
 pub enum TrayAction {
-    /// Left click; carries the icon's centre in physical pixels.
+    /// Mouse-down on the left icon; carries the icon's centre in physical pixels.
+    PointerDown(Option<(f32, f32)>),
+    /// Left click release; carries the icon's centre in physical pixels.
     Toggle(Option<(f32, f32)>),
     /// Menu "Open / Hide Flyout".
     ToggleFromMenu,
@@ -307,17 +309,37 @@ impl TrayController {
         let tx_icon = tx.clone();
         let wake_icon = wake.clone();
         TrayIconEvent::set_event_handler(Some(move |e: TrayIconEvent| {
-            if let TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                rect,
-                ..
-            } = e
-            {
-                let cx = rect.position.x as f32 + rect.size.width as f32 / 2.0;
-                let cy = rect.position.y as f32 + rect.size.height as f32 / 2.0;
-                let _ = tx_icon.send(TrayAction::Toggle(Some((cx, cy))));
-                wake_icon();
+            let center = |rect: tray_icon::Rect| {
+                (
+                    rect.position.x as f32 + rect.size.width as f32 / 2.0,
+                    rect.position.y as f32 + rect.size.height as f32 / 2.0,
+                )
+            };
+            match e {
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Down,
+                    rect,
+                    ..
+                }
+                | TrayIconEvent::DoubleClick {
+                    button: MouseButton::Left,
+                    rect,
+                    ..
+                } => {
+                    let _ = tx_icon.send(TrayAction::PointerDown(Some(center(rect))));
+                    wake_icon();
+                }
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    rect,
+                    ..
+                } => {
+                    let _ = tx_icon.send(TrayAction::Toggle(Some(center(rect))));
+                    wake_icon();
+                }
+                _ => {}
             }
         }));
 

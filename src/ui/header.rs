@@ -9,7 +9,7 @@ use super::icons;
 use crate::{
     constants::{FLYOUT_RADIUS, FLYOUT_WIDTH, PALETTE},
     poller::{Connection, Snapshot},
-    theme::{active_tint_bg, border_subtle, hover_overlay},
+    theme::{active_tint_bg, border_input, border_subtle, hover_overlay},
 };
 
 #[derive(Default)]
@@ -50,15 +50,52 @@ fn icon_button(
     draw: impl FnOnce(&egui::Painter, egui::Rect, Color32),
 ) -> bool {
     let (rect, resp) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::click());
-    let bg = if active {
-        active_tint_bg()
-    } else if resp.hovered() {
-        hover_overlay()
+    let hovered = resp.hovered();
+    let pressed = resp.is_pointer_button_down_on();
+    if hovered {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+
+    let (bg, stroke, color) = if active && pressed {
+        (
+            active_tint_bg(),
+            Stroke::new(1.0, PALETTE.focus),
+            Color32::WHITE,
+        )
+    } else if active && hovered {
+        (
+            active_tint_bg(),
+            Stroke::new(1.0, PALETTE.focus.gamma_multiply(0.75)),
+            Color32::WHITE,
+        )
+    } else if active {
+        (active_tint_bg(), Stroke::NONE, PALETTE.focus)
+    } else if pressed {
+        (
+            active_tint_bg(),
+            Stroke::new(1.0, PALETTE.focus.gamma_multiply(0.75)),
+            PALETTE.focus,
+        )
+    } else if hovered {
+        (
+            hover_overlay(),
+            Stroke::new(1.0, border_input()),
+            Color32::WHITE,
+        )
     } else {
-        Color32::TRANSPARENT
+        (
+            Color32::TRANSPARENT,
+            Stroke::NONE,
+            PALETTE.on_surface_variant,
+        )
     };
+
     if bg != Color32::TRANSPARENT {
         ui.painter().rect_filled(rect, CornerRadius::same(6), bg);
+    }
+    if stroke != Stroke::NONE {
+        ui.painter()
+            .rect_stroke(rect, CornerRadius::same(6), stroke, StrokeKind::Inside);
     }
     if resp.has_focus() {
         ui.painter().rect_stroke(
@@ -68,13 +105,6 @@ fn icon_button(
             StrokeKind::Inside,
         );
     }
-    let color = if active {
-        PALETTE.focus
-    } else if resp.hovered() {
-        Color32::WHITE
-    } else {
-        PALETTE.on_surface_variant
-    };
     draw(ui.painter(), rect.shrink(5.0), color);
     resp.on_hover_text(tooltip).clicked()
 }
@@ -93,73 +123,75 @@ pub fn show(ui: &mut Ui, snap: &Snapshot, in_settings: bool) -> HeaderOutput {
         })
         .inner_margin(Margin::symmetric(12, 8))
         .show(ui, |ui| {
-            ui.set_width(FLYOUT_WIDTH - 24.0);
-            ui.set_height(28.0);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing = Vec2::new(6.0, 0.0);
+            ui.allocate_ui_with_layout(
+                Vec2::new(FLYOUT_WIDTH - 24.0, 28.0),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(6.0, 0.0);
 
-                if in_settings {
-                    out.back = icon_button(ui, false, "Back to devices", icons::back);
-                } else {
-                    let (dot, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
-                    ui.painter()
-                        .circle_filled(dot.center(), 5.0, status_color(snap));
-                    ui.painter().circle_stroke(
-                        dot.center(),
-                        5.0,
-                        Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 38)),
-                    );
-                }
-
-                ui.label(
-                    RichText::new("PiDA")
-                        .size(13.5)
-                        .strong()
-                        .color(Color32::WHITE),
-                );
-                ui.label(RichText::new("·").size(11.0).color(PALETTE.muted));
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(status_label(snap, in_settings))
-                            .size(11.0)
-                            .color(if is_live && !in_settings {
-                                PALETTE.on_surface
-                            } else {
-                                PALETTE.on_surface_variant
-                            }),
-                    )
-                    .truncate(),
-                );
-
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.spacing_mut().item_spacing = Vec2::new(2.0, 0.0);
-                    out.hide = icon_button(ui, false, "Hide flyout (Esc)", icons::close);
-                    out.settings = icon_button(
-                        ui,
-                        in_settings,
-                        if in_settings {
-                            "Back to devices"
-                        } else {
-                            "Settings"
-                        },
-                        icons::gear,
-                    );
-                    if !in_settings {
-                        let pinned = snap.settings.pin_flyout;
-                        out.toggle_pin = icon_button(
-                            ui,
-                            pinned,
-                            if pinned {
-                                "Unpin flyout (auto-hide on blur)"
-                            } else {
-                                "Pin flyout open"
-                            },
-                            |p, r, c| icons::pin(p, r, c, pinned),
+                    if in_settings {
+                        out.back = icon_button(ui, false, "Back to devices", icons::back);
+                    } else {
+                        let (dot, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+                        ui.painter()
+                            .circle_filled(dot.center(), 5.0, status_color(snap));
+                        ui.painter().circle_stroke(
+                            dot.center(),
+                            5.0,
+                            Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 38)),
                         );
-                        out.refresh = icon_button(ui, false, "Refresh devices", icons::refresh);
                     }
-                });
-            });
+
+                    ui.label(
+                        RichText::new("PiDA")
+                            .size(13.5)
+                            .strong()
+                            .color(Color32::WHITE),
+                    );
+                    ui.label(RichText::new("·").size(11.0).color(PALETTE.muted));
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(status_label(snap, in_settings))
+                                .size(11.0)
+                                .color(if is_live && !in_settings {
+                                    PALETTE.on_surface
+                                } else {
+                                    PALETTE.on_surface_variant
+                                }),
+                        )
+                        .truncate(),
+                    );
+
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(2.0, 0.0);
+                        out.hide = icon_button(ui, false, "Hide flyout (Esc)", icons::close);
+                        out.settings = icon_button(
+                            ui,
+                            in_settings,
+                            if in_settings {
+                                "Back to devices"
+                            } else {
+                                "Settings"
+                            },
+                            icons::gear,
+                        );
+                        if !in_settings {
+                            let pinned = snap.settings.pin_flyout;
+                            out.toggle_pin = icon_button(
+                                ui,
+                                pinned,
+                                if pinned {
+                                    "Unpin flyout (auto-hide on blur)"
+                                } else {
+                                    "Pin flyout open"
+                                },
+                                |p, r, c| icons::pin(p, r, c, pinned),
+                            );
+                            out.refresh = icon_button(ui, false, "Refresh devices", icons::refresh);
+                        }
+                    });
+                },
+            );
         });
 
     let rect = resp.response.rect;

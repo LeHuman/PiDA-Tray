@@ -1,4 +1,4 @@
-//! `PiDaTrayApp`: flyout show/hide, focus-loss grace, and the card shell.
+//! `PiDaTrayApp`: reveal/park lifecycle, focus-loss grace, and the card shell.
 
 mod devices;
 mod header;
@@ -7,16 +7,18 @@ mod settings;
 
 use std::{
     sync::{Arc, mpsc},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
-use eframe::egui::{self, CornerRadius, Margin, RichText, Stroke, ViewportCommand, vec2};
+use eframe::egui::{
+    self, Color32, CornerRadius, Margin, RichText, Stroke, StrokeKind, ViewportCommand, vec2,
+};
 
 use crate::{
     constants::{
-        CARD_STROKE_WIDTH, FLYOUT_DEFAULT_HEIGHT, FLYOUT_MAX_HEIGHT, FLYOUT_MIN_HEIGHT,
-        FLYOUT_OUTER_WIDTH, FLYOUT_PADDING, FLYOUT_RADIUS, FLYOUT_SCREEN_MARGIN, FLYOUT_WIDTH,
-        FOCUS_LOSS_GRACE, PALETTE,
+        CARD_BLEED, CARD_STROKE_WIDTH, FLYOUT_DEFAULT_HEIGHT, FLYOUT_MAX_HEIGHT, FLYOUT_MIN_HEIGHT,
+        FLYOUT_OUTER_WIDTH, FLYOUT_PADDING, FLYOUT_RADIUS, FLYOUT_SCREEN_MARGIN,
+        FLYOUT_SHOW_MIN_HEIGHT, FLYOUT_WIDTH, FOCUS_LOSS_GRACE, PALETTE, PARKED_POS,
     },
     poller::{Command, Connection, Poller, Shared},
     power,
@@ -30,6 +32,17 @@ enum View {
     Settings,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RevealPhase {
+    Hidden,
+    /// Position and uncloak in one tick, reusing the frame the parked window
+    /// already painted.
+    RevealNow,
+    Settling,
+    ReadyToUncloak,
+    Shown,
+}
+
 pub struct PiDaTrayApp {
     shared: Arc<Shared>,
     poller: Poller,
@@ -37,11 +50,13 @@ pub struct PiDaTrayApp {
     tray: Option<TrayController>,
 
     visible: bool,
-    startup_parked: bool,
+    reveal_phase: RevealPhase,
+    /// Logical position to reveal at, consumed on the next tick.
+    pending_reveal: Option<egui::Pos2>,
     view: View,
     /// Tray-icon centre in physical pixels, used to (re)place the flyout.
     anchor: Option<(f32, f32)>,
-    last_height: f32,
+    last_viewport_height: f32,
     /// Set when the user drags the flyout to a custom height.
     manual_height: Option<f32>,
     /// Content-fit cap for this monitor's work area.
@@ -52,7 +67,13 @@ pub struct PiDaTrayApp {
     dirty_height: bool,
     shown_at: Option<Instant>,
     seen_focused_while_shown: bool,
+    hidden_by_blur_at: Option<Instant>,
+    suppress_next_tray_up: bool,
     quitting: bool,
+    parked: bool,
+    /// Set once the flyout has actually painted a frame, so the parked swap
+    /// chain holds real content that can be revealed immediately.
+    painted_once: bool,
 
     devices: devices::DevicesView,
     settings: settings::SettingsView,
@@ -91,8 +112,9 @@ impl PiDaTrayApp {
         let manual_height = shared
             .settings()
             .flyout_height
-            .filter(|h| h.is_finite() && *h >= FLYOUT_MIN_HEIGHT);
-        let last_height = manual_height.unwrap_or(FLYOUT_DEFAULT_HEIGHT);
+            .filter(|h| h.is_finite())
+            .map(|h| h.max(FLYOUT_MIN_HEIGHT));
+        let last_viewport_height = manual_height.unwrap_or(FLYOUT_DEFAULT_HEIGHT);
 
         Self {
             shared,
@@ -100,17 +122,22 @@ impl PiDaTrayApp {
             actions,
             tray,
             visible: false,
-            startup_parked: false,
+            reveal_phase: RevealPhase::Hidden,
+            pending_reveal: None,
             view: View::Devices,
             anchor: None,
-            last_height,
+            last_viewport_height,
             manual_height,
             max_height: FLYOUT_MAX_HEIGHT,
             size_settle: 0,
             dirty_height: false,
             shown_at: None,
             seen_focused_while_shown: false,
+            hidden_by_blur_at: None,
+            suppress_next_tray_up: false,
             quitting: false,
+            parked: false,
+            painted_once: false,
             devices: Default::default(),
             settings: Default::default(),
         }
@@ -118,21 +145,18 @@ impl PiDaTrayApp {
 
     // -- window management ---------------------------------------------------
 
-    fn place(&mut self, ctx: &egui::Context) {
-        let Some(anchor) = self.anchor else { return };
-        let Some((work, monitor)) = tray::monitor_rects_at(anchor.0, anchor.1) else {
-            return;
-        };
+    /// Logical `OuterPosition` for the current anchor and height. Also refreshes
+    /// `max_height` from the monitor work area.
+    fn compute_placement(&mut self, ctx: &egui::Context, height: f32) -> Option<egui::Pos2> {
+        let anchor = self.anchor?;
+        let (work, monitor) = tray::monitor_rects_at(anchor.0, anchor.1)?;
         let current_ppp = ctx.pixels_per_point().max(0.5);
         let target_ppp = tray::monitor_dpi_scale_at(anchor.0, anchor.1)
             .unwrap_or(current_ppp)
             .max(0.5);
         self.max_height = ((work.bottom - work.top) / target_ppp - 2.0 * FLYOUT_SCREEN_MARGIN)
             .clamp(FLYOUT_MIN_HEIGHT, FLYOUT_MAX_HEIGHT);
-        let height = self
-            .manual_height
-            .unwrap_or(self.last_height)
-            .clamp(FLYOUT_MIN_HEIGHT, self.max_height);
+        let height = height.clamp(FLYOUT_MIN_HEIGHT, self.max_height);
         let size_px = (FLYOUT_OUTER_WIDTH * target_ppp, height * target_ppp);
         let (x, y) = tray::compute_flyout_pos(
             anchor,
@@ -142,47 +166,71 @@ impl PiDaTrayApp {
             FLYOUT_SCREEN_MARGIN * target_ppp,
         );
         // `egui-winit` multiplies `OuterPosition` by the window's *current* `pixels_per_point`.
-        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(egui::pos2(
-            x / current_ppp,
-            y / current_ppp,
-        )));
+        Some(egui::pos2(x / current_ppp, y / current_ppp))
     }
 
-    fn park(&self, ctx: &egui::Context) {
-        crate::set_window_cloaked(true);
-        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(egui::pos2(
-            -32000.0, -32000.0,
-        )));
+    fn place(&mut self, ctx: &egui::Context, height: f32) {
+        if let Some(pos) = self.compute_placement(ctx, height) {
+            ctx.send_viewport_cmd(ViewportCommand::OuterPosition(pos));
+        }
     }
 
-    fn show(&mut self, ctx: &egui::Context, anchor: Option<(f32, f32)>) {
-        crate::set_window_cloaked(false);
-        self.anchor = anchor.or(self.anchor).or_else(tray::cursor_pos);
+    fn park_window(&mut self, ctx: &egui::Context) {
+        if self.parked {
+            return;
+        }
+        self.parked = true;
+        ctx.send_viewport_cmd(ViewportCommand::OuterPosition(PARKED_POS));
+    }
+
+    fn show(&mut self, ctx: &egui::Context, anchor: Option<(f32, f32)>, settle: bool) {
+        if let Some(anchor) = anchor {
+            self.anchor = Some(anchor);
+        } else if self.anchor.is_none() {
+            self.anchor = tray::cursor_pos();
+        }
+
+        if self.reveal_phase == RevealPhase::Shown {
+            ctx.send_viewport_cmd(ViewportCommand::Focus);
+            self.shown_at = Some(Instant::now());
+            self.seen_focused_while_shown = false;
+            return;
+        }
+
+        let previous_height = self.last_viewport_height;
+        let desired = self
+            .manual_height
+            .unwrap_or(previous_height.max(FLYOUT_SHOW_MIN_HEIGHT));
+        let pos = self.compute_placement(ctx, desired);
+        let target = desired.clamp(FLYOUT_MIN_HEIGHT, self.max_height);
+
         self.visible = true;
         self.view = View::Devices;
-        self.shown_at = Some(Instant::now());
+        self.shown_at = None;
         self.seen_focused_while_shown = false;
         self.shared.set_visible(true);
-        self.place(ctx);
-        self.last_height = self
-            .manual_height
-            .unwrap_or(self.last_height)
-            .clamp(FLYOUT_MIN_HEIGHT, self.max_height);
-        ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(
-            FLYOUT_OUTER_WIDTH,
-            self.last_height,
-        )));
-        self.place(ctx);
+        self.last_viewport_height = target;
         self.size_settle = 3;
-        ctx.send_viewport_cmd(ViewportCommand::MaxInnerSize(vec2(
-            FLYOUT_OUTER_WIDTH,
-            self.max_height,
-        )));
-        ctx.send_viewport_cmd(ViewportCommand::Visible(true));
-        ctx.send_viewport_cmd(ViewportCommand::Focus);
+
+        // Fast path: the parked swap chain already holds a frame at exactly
+        // this size, so `logic` can move and uncloak the window in one tick
+        // instead of waiting for viewport commands to round-trip.
+        let fast = cfg!(windows)
+            && !settle
+            && self.painted_once
+            && pos.is_some()
+            && (target - previous_height).abs() <= f32::EPSILON;
+        if fast {
+            self.pending_reveal = pos;
+            self.reveal_phase = RevealPhase::RevealNow;
+        } else {
+            self.pending_reveal = None;
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(FLYOUT_OUTER_WIDTH, target)));
+            self.reveal_phase = RevealPhase::Settling;
+        }
+
         self.poller.send(Command::Sync);
         ctx.request_repaint();
-        ctx.request_repaint_after(std::time::Duration::from_millis(16));
     }
 
     fn hide(&mut self, ctx: &egui::Context) {
@@ -195,12 +243,13 @@ impl PiDaTrayApp {
         }
         self.devices.flush_all(&self.shared, &self.poller);
         self.visible = false;
+        self.reveal_phase = RevealPhase::Hidden;
         self.view = View::Devices;
         self.settings.reset();
         self.shown_at = None;
         self.seen_focused_while_shown = false;
         self.shared.set_visible(false);
-        self.park(ctx);
+        self.park_window(ctx);
         ctx.request_repaint();
     }
 
@@ -214,12 +263,41 @@ impl PiDaTrayApp {
     fn drain_tray_actions(&mut self, ctx: &egui::Context) {
         while let Ok(action) = self.actions.try_recv() {
             match action {
-                TrayAction::Toggle(anchor) => self.toggle(ctx, anchor),
-                TrayAction::ToggleFromMenu => self.toggle(ctx, tray::cursor_pos()),
+                TrayAction::PointerDown(anchor) => {
+                    if let Some(anchor) = anchor {
+                        self.anchor = Some(anchor);
+                    }
+                    let just_blurred = self
+                        .hidden_by_blur_at
+                        .take()
+                        .is_some_and(|t| t.elapsed() < Duration::from_millis(200));
+                    if self.visible || just_blurred {
+                        // Clicking the tray icon while open triggers taskbar focus
+                        // loss on mouse-down; consume the matching mouse-up so the
+                        // flyout closes cleanly instead of bouncing back open.
+                        self.suppress_next_tray_up = true;
+                        if self.visible {
+                            self.hide(ctx);
+                        }
+                    }
+                }
+                TrayAction::Toggle(anchor) => {
+                    if anchor.is_some() && self.suppress_next_tray_up {
+                        self.suppress_next_tray_up = false;
+                    } else {
+                        self.suppress_next_tray_up = false;
+                        self.toggle(ctx, anchor);
+                    }
+                }
+                TrayAction::ToggleFromMenu => {
+                    self.suppress_next_tray_up = false;
+                    self.toggle(ctx, tray::cursor_pos());
+                }
                 TrayAction::Refresh => self.poller.send(Command::Sync),
                 TrayAction::Settings => {
-                    self.show(ctx, tray::cursor_pos());
+                    self.show(ctx, tray::cursor_pos(), true);
                     self.view = View::Settings;
+                    self.settings.reset();
                 }
                 TrayAction::Quit => {
                     self.quitting = true;
@@ -233,7 +311,7 @@ impl PiDaTrayApp {
         if self.visible {
             self.hide(ctx)
         } else {
-            self.show(ctx, anchor)
+            self.show(ctx, anchor, false)
         }
     }
 
@@ -248,27 +326,37 @@ impl PiDaTrayApp {
         tray.sync(StatusKey::from_state(conn, has_error), devices);
     }
 
-    fn apply_focus_policy(&mut self, ctx: &egui::Context, pinned: bool) {
+    fn apply_focus_policy(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        let pinned = self.shared.read(|s| s.settings.pin_flyout);
         if pinned {
             self.seen_focused_while_shown = false;
             return;
         }
-        let focused = ctx.input(|i| i.viewport().focused);
+
+        let focused =
+            crate::flyout_has_foreground(frame).or_else(|| ctx.input(|i| i.viewport().focused));
         if focused == Some(true) {
             self.seen_focused_while_shown = true;
-            return;
-        }
-        if focused == Some(false) {
-            let elapsed = self
+        } else if focused == Some(false) {
+            let past_grace = self
                 .shown_at
-                .map(|t| t.elapsed())
-                .unwrap_or(FOCUS_LOSS_GRACE);
-            if self.seen_focused_while_shown || elapsed >= FOCUS_LOSS_GRACE {
+                .map(|t| t.elapsed() >= FOCUS_LOSS_GRACE)
+                .unwrap_or(false);
+            // Only auto-hide if the flyout genuinely held focus and then lost
+            // it. Windows can refuse activation for a tray-owned process
+            // entirely; treating "never focused" as "user left" closed the
+            // flyout a frame after it opened.
+            if self.seen_focused_while_shown && past_grace {
+                self.hidden_by_blur_at = Some(Instant::now());
                 self.hide(ctx);
-            } else {
-                ctx.request_repaint_after(FOCUS_LOSS_GRACE - elapsed);
+                return;
             }
         }
+
+        // egui idles between events, and a click into another application
+        // delivers no event to this window, so a blur would otherwise only be
+        // noticed on the next poll tick. Pulse while the flyout is shown.
+        ctx.request_repaint_after(Duration::from_millis(100));
     }
 
     // -- drawing ---------------------------------------------------------------
@@ -277,196 +365,234 @@ impl PiDaTrayApp {
         let ctx = ui.ctx().clone();
         let snap = self.shared.snapshot();
 
-        let outer = egui::CentralPanel::default()
+        let card_response = egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
                 ui.set_width(FLYOUT_OUTER_WIDTH);
 
-                let card = egui::Frame::new()
+                egui::Frame::new()
                     .fill(PALETTE.surface)
                     .corner_radius(CornerRadius::same(FLYOUT_RADIUS))
                     .stroke(Stroke::new(CARD_STROKE_WIDTH, border_card()))
-                    .inner_margin(Margin::same(0));
+                    .inner_margin(Margin::same(0))
+                    // Keep the border and its anti-aliasing off the window's
+                    // swap-chain edge; the bleed is transparent.
+                    .outer_margin(Margin::same(CARD_BLEED as i8))
+                    .show(ui, |ui| {
+                        ui.set_width(FLYOUT_WIDTH);
+                        ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
 
-                let outcome = card.show(ui, |ui| {
-                    ui.set_width(FLYOUT_WIDTH);
-                    ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+                        let head = header::show(ui, &snap, self.view == View::Settings);
+                        let mut close_settings = false;
+                        let mut reset_size = false;
 
-                    let head = header::show(ui, &snap, self.view == View::Settings);
-                    let mut close_settings = false;
-                    let mut reset_size = false;
+                        match self.view {
+                            View::Settings => {
+                                let outcome = self.settings.show(ui, &self.shared, &self.poller);
+                                close_settings = outcome.close;
+                                reset_size = outcome.reset_size;
+                            }
+                            View::Devices => {
+                                egui::Frame::new()
+                                    .inner_margin(Margin::same(FLYOUT_PADDING as i8))
+                                    .show(ui, |ui| {
+                                        ui.set_width(FLYOUT_WIDTH - 2.0 * FLYOUT_PADDING);
+                                        ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
 
-                    match self.view {
-                        View::Settings => {
-                            let outcome = self.settings.show(ui, &self.shared, &self.poller);
-                            close_settings = outcome.close;
-                            reset_size = outcome.reset_size;
-                        }
-                        View::Devices => {
-                            egui::Frame::new()
-                                .inner_margin(Margin::same(FLYOUT_PADDING as i8))
-                                .show(ui, |ui| {
-                                    ui.set_width(FLYOUT_WIDTH - 2.0 * FLYOUT_PADDING);
-                                    ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
-
-                                    if let Some(msg) = &snap.banner {
-                                        let clicked = egui::Frame::new()
-                                            .fill(PALETTE.error_surface)
-                                            .corner_radius(CornerRadius::same(8))
-                                            .stroke(Stroke::new(1.0, PALETTE.error))
-                                            .inner_margin(Margin::symmetric(10, 6))
-                                            .show(ui, |ui| {
-                                                ui.set_width(ui.available_width());
-                                                ui.add(
-                                                    egui::Label::new(
-                                                        RichText::new(msg)
-                                                            .size(11.5)
-                                                            .color(PALETTE.error),
+                                        if let Some(msg) = &snap.banner {
+                                            let clicked = egui::Frame::new()
+                                                .fill(PALETTE.error_surface)
+                                                .corner_radius(CornerRadius::same(8))
+                                                .stroke(Stroke::new(1.0, PALETTE.error))
+                                                .inner_margin(Margin::symmetric(10, 6))
+                                                .show(ui, |ui| {
+                                                    ui.set_width(ui.available_width());
+                                                    ui.add(
+                                                        egui::Label::new(
+                                                            RichText::new(msg)
+                                                                .size(11.5)
+                                                                .color(PALETTE.error),
+                                                        )
+                                                        .sense(egui::Sense::click()),
                                                     )
-                                                    .sense(egui::Sense::click()),
-                                                )
-                                                .on_hover_text("Click to dismiss")
-                                                .clicked()
-                                            })
-                                            .inner;
-                                        if clicked {
-                                            self.shared.update(|s| s.banner = None);
+                                                    .on_hover_text("Click to dismiss")
+                                                    .clicked()
+                                                })
+                                                .inner;
+                                            if clicked {
+                                                self.shared.update(|s| s.banner = None);
+                                            }
                                         }
-                                    }
 
-                                    if snap.connection == Connection::Unconfigured {
-                                        ui.label(
-                                            RichText::new("No server configured")
-                                                .color(PALETTE.on_surface_variant),
-                                        );
-                                        let btn = egui::Button::new(
-                                            RichText::new("Configure Server URL")
-                                                .strong()
-                                                .color(Color32::WHITE),
-                                        )
-                                        .fill(PALETTE.primary)
-                                        .stroke(Stroke::NONE)
-                                        .corner_radius(CornerRadius::same(6));
-                                        if ui.add(btn).clicked() {
-                                            self.view = View::Settings;
-                                        }
-                                    } else {
-                                        if snap.connection == Connection::Offline
-                                            && !snap.catalog.is_empty()
-                                        {
+                                        if snap.connection == Connection::Unconfigured {
                                             ui.label(
-                                                RichText::new("Offline — showing last known state")
+                                                RichText::new("No server configured")
+                                                    .color(PALETTE.on_surface_variant),
+                                            );
+                                            let btn = egui::Button::new(
+                                                RichText::new("Configure Server URL")
+                                                    .strong()
+                                                    .color(Color32::WHITE),
+                                            )
+                                            .fill(PALETTE.primary)
+                                            .stroke(Stroke::NONE)
+                                            .corner_radius(CornerRadius::same(6));
+                                            if ui.add(btn).clicked() {
+                                                self.view = View::Settings;
+                                            }
+                                        } else {
+                                            if snap.connection == Connection::Offline
+                                                && !snap.catalog.is_empty()
+                                            {
+                                                ui.label(
+                                                    RichText::new(
+                                                        "Offline — showing last known state",
+                                                    )
                                                     .color(PALETTE.warn)
                                                     .size(11.0),
-                                            );
-                                        }
-                                        let extra =
-                                            (if snap.banner.is_some() { 46.0 } else { 0.0 })
-                                                + (if snap.connection == Connection::Offline
-                                                    && !snap.catalog.is_empty()
-                                                {
-                                                    24.0
-                                                } else {
-                                                    0.0
+                                                );
+                                            }
+                                            let extra =
+                                                (if snap.banner.is_some() { 46.0 } else { 0.0 })
+                                                    + (if snap.connection == Connection::Offline
+                                                        && !snap.catalog.is_empty()
+                                                    {
+                                                        24.0
+                                                    } else {
+                                                        0.0
+                                                    });
+                                            let scroll_max = if self.manual_height.is_some() {
+                                                ui.available_height().max(120.0)
+                                            } else {
+                                                (self.max_height - 84.0 - extra).max(120.0)
+                                            };
+                                            egui::ScrollArea::vertical()
+                                                .max_height(scroll_max)
+                                                .auto_shrink([false, true])
+                                                .show(ui, |ui| {
+                                                    self.devices.show(
+                                                        ui,
+                                                        &snap,
+                                                        &self.shared,
+                                                        &self.poller,
+                                                    )
                                                 });
-                                        let scroll_max = if self.manual_height.is_some() {
-                                            ui.available_height().max(120.0)
-                                        } else {
-                                            (self.max_height - 84.0 - extra).max(120.0)
-                                        };
-                                        egui::ScrollArea::vertical()
-                                            .max_height(scroll_max)
-                                            .auto_shrink([false, true])
-                                            .show(ui, |ui| {
-                                                self.devices.show(
-                                                    ui,
-                                                    &snap,
-                                                    &self.shared,
-                                                    &self.poller,
-                                                )
-                                            });
-                                    }
-                                });
+                                        }
+                                    });
+                            }
                         }
-                    }
-                    (head, close_settings, reset_size)
-                });
-
-                let (head, close_settings, reset_size) = outcome.inner;
-                if reset_size {
-                    self.manual_height = None;
-                    self.last_height = FLYOUT_DEFAULT_HEIGHT;
-                    self.shared.update(|s| s.settings.flyout_height = None);
-                    self.shared.save_settings();
-                    self.size_settle = 3;
-                    ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(
-                        FLYOUT_OUTER_WIDTH,
-                        self.last_height,
-                    )));
-                    self.place(&ctx);
-                    ctx.request_repaint();
-                }
-                if close_settings {
-                    self.view = View::Devices;
-                }
-                if head.refresh {
-                    self.poller.send(Command::Sync);
-                }
-                if head.toggle_pin {
-                    let pin = !snap.settings.pin_flyout;
-                    self.shared.update(|s| s.settings.pin_flyout = pin);
-                    self.shared.save_settings();
-                }
-                if head.settings {
-                    self.view = if self.view == View::Settings {
-                        View::Devices
-                    } else {
-                        View::Settings
-                    };
-                    if self.view == View::Devices {
-                        self.settings.reset();
-                    }
-                }
-                if head.back {
-                    self.settings.reset();
-                    self.view = View::Devices;
-                }
-                if head.hide {
-                    self.hide(&ctx);
-                    return None;
-                }
-
-                Some(outcome.response.rect.height())
+                        (head, close_settings, reset_size)
+                    })
             });
 
-        // Content-hugging height, unless the user dragged the flyout to a custom size.
-        if let Some(measured) = outer.inner {
-            if self.size_settle > 0 {
-                self.size_settle -= 1;
-            } else if let Some(actual) =
-                ctx.input(|i| i.viewport().inner_rect.map(|rect| rect.height()))
-                && (actual - self.last_height).abs() > 2.0
-            {
-                let height = actual.clamp(FLYOUT_MIN_HEIGHT, self.max_height);
-                self.manual_height = Some(height);
-                self.last_height = height;
-                self.dirty_height = true;
-                self.place(&ctx);
-            }
+        // Repaint the 1px border last, inset into the card rect. The frame's own
+        // stroke is painted before the children, so the header/footer fills sit
+        // on top of its top and bottom runs; repainting here makes the border
+        // uniform on all four edges at every DPI.
+        let card_rect = card_response.response.rect.shrink(CARD_BLEED);
+        ui.painter().rect_stroke(
+            card_rect,
+            CornerRadius::same(FLYOUT_RADIUS),
+            Stroke::new(CARD_STROKE_WIDTH, border_card()),
+            StrokeKind::Inside,
+        );
 
-            let target = measured.ceil().clamp(FLYOUT_MIN_HEIGHT, self.max_height);
-            if self.manual_height.is_none() && (target - self.last_height).abs() > 1.5 {
-                self.last_height = target;
-                ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(FLYOUT_OUTER_WIDTH, target)));
-                self.size_settle = 3;
-                self.place(&ctx);
+        let (head, close_settings, reset_size) = card_response.inner.inner;
+        if reset_size {
+            self.manual_height = None;
+            self.last_viewport_height = FLYOUT_DEFAULT_HEIGHT;
+            self.shared.update(|s| s.settings.flyout_height = None);
+            self.shared.save_settings();
+            self.size_settle = 3;
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(
+                FLYOUT_OUTER_WIDTH,
+                self.last_viewport_height,
+            )));
+            self.place(&ctx, self.last_viewport_height);
+            ctx.request_repaint();
+        }
+        if close_settings {
+            self.view = View::Devices;
+        }
+        if head.refresh {
+            self.poller.send(Command::Sync);
+        }
+        if head.toggle_pin {
+            let pin = !snap.settings.pin_flyout;
+            self.shared.update(|s| s.settings.pin_flyout = pin);
+            self.shared.save_settings();
+        }
+        if head.settings {
+            self.view = if self.view == View::Settings {
+                View::Devices
+            } else {
+                View::Settings
+            };
+            if self.view == View::Devices {
+                self.settings.reset();
+            }
+        }
+        if head.back {
+            self.settings.reset();
+            self.view = View::Devices;
+        }
+        if head.hide {
+            self.hide(&ctx);
+            return;
+        }
+
+        self.painted_once = true;
+
+        // Detect a user-dragged size before measuring content, otherwise the
+        // auto-fit branch would immediately snap the window back.
+        if self.size_settle > 0 {
+            self.size_settle -= 1;
+        } else if let Some(actual) =
+            ctx.input(|i| i.viewport().inner_rect.map(|rect| rect.height()))
+            && (actual - self.last_viewport_height).abs() > 2.0
+        {
+            let height = actual.clamp(FLYOUT_MIN_HEIGHT, self.max_height);
+            self.manual_height = Some(height);
+            self.last_viewport_height = height;
+            self.dirty_height = true;
+            self.place(&ctx, height);
+        }
+
+        // Content height (capped by the monitor-aware `max_height`). In manual
+        // mode the user's dragged height wins; otherwise shrink/grow to fit.
+        let content_h = card_response
+            .inner
+            .response
+            .rect
+            .height()
+            .ceil()
+            .max(FLYOUT_MIN_HEIGHT);
+        let measured_h = self
+            .manual_height
+            .unwrap_or(content_h)
+            .clamp(FLYOUT_MIN_HEIGHT, self.max_height);
+
+        if (measured_h - self.last_viewport_height).abs() > 1.5 {
+            self.last_viewport_height = measured_h;
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(
+                FLYOUT_OUTER_WIDTH,
+                measured_h,
+            )));
+            self.size_settle = 3;
+            if self.reveal_phase == RevealPhase::Shown {
+                self.place(&ctx, measured_h);
+            } else {
+                self.reveal_phase = RevealPhase::Settling;
                 ctx.request_repaint();
             }
+        } else if self.reveal_phase == RevealPhase::Settling {
+            self.place(&ctx, self.last_viewport_height);
+            self.parked = false;
+            self.reveal_phase = RevealPhase::ReadyToUncloak;
+            ctx.request_repaint();
         }
     }
 }
-
-use eframe::egui::Color32;
 
 impl eframe::App for PiDaTrayApp {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
@@ -474,13 +600,42 @@ impl eframe::App for PiDaTrayApp {
     }
 
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // Runs even while the flyout is hidden, so the window is clean before
+        // it is ever shown.
         crate::ensure_borderless_window_policy(frame);
 
-        // `eframe` 0.37 keeps a mapped-but-off-screen window warm so showing it
-        // never presents an unpainted swap chain. Park once on the first tick.
-        if !self.startup_parked {
-            self.startup_parked = true;
-            self.park(ctx);
+        // Tell egui the truth about viewport focus. eframe's 0.37 `App::ui`
+        // path can leave `InputState::focused` false for a window that Windows
+        // has activated, and egui gates the text caret and focus rings on that
+        // flag: the server URL field would accept typing with no visible caret.
+        if let Some(has_foreground) = crate::flyout_has_foreground(frame) {
+            ctx.input_mut(|input| input.focused = has_foreground);
+        }
+
+        if self.reveal_phase == RevealPhase::RevealNow {
+            if let Some(pos) = self.pending_reveal.take() {
+                let ppp = ctx.pixels_per_point();
+                crate::reveal_flyout_at(
+                    frame,
+                    pos.x * ppp,
+                    pos.y * ppp,
+                    FLYOUT_OUTER_WIDTH * ppp,
+                    self.last_viewport_height * ppp,
+                );
+            }
+            self.parked = false;
+            self.reveal_phase = RevealPhase::Shown;
+            self.shown_at = Some(Instant::now());
+            self.seen_focused_while_shown = false;
+        }
+
+        if self.reveal_phase == RevealPhase::ReadyToUncloak {
+            crate::set_window_cloaked(frame, false);
+            crate::focus_flyout_window(frame);
+            ctx.send_viewport_cmd(ViewportCommand::Focus);
+            self.shown_at = Some(Instant::now());
+            self.seen_focused_while_shown = false;
+            self.reveal_phase = RevealPhase::Shown;
         }
 
         self.sync_tray();
@@ -488,25 +643,34 @@ impl eframe::App for PiDaTrayApp {
         self.handle_close_request(ctx);
 
         if self.visible {
-            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-                if self.view == View::Settings {
-                    self.settings.reset();
-                    self.view = View::Devices;
-                } else {
-                    self.hide(ctx);
-                    return;
+            if self.reveal_phase == RevealPhase::Shown {
+                if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    if self.view == View::Settings {
+                        self.settings.reset();
+                        self.view = View::Devices;
+                    } else if !self.shared.read(|s| s.settings.pin_flyout) {
+                        self.hide(ctx);
+                    }
+                }
+                if self.visible {
+                    self.apply_focus_policy(ctx, frame);
                 }
             }
-            let pinned = self.shared.read(|s| s.settings.pin_flyout);
-            self.apply_focus_policy(ctx, pinned);
+        } else {
+            crate::set_window_cloaked(frame, true);
+            self.park_window(ctx);
         }
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         // Hidden: nothing to lay out or paint (0% GPU/CPU while idle).
         if !self.visible {
+            crate::set_window_cloaked(frame, true);
             return;
         }
         self.draw(ui);
+        if !self.visible {
+            crate::set_window_cloaked(frame, true);
+        }
     }
 }

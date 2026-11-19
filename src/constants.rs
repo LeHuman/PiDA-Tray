@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use eframe::egui::Color32;
+use eframe::egui::{Color32, Pos2};
 
 pub const APP_ID: &str = "PiDA-Tray";
 pub const APP_NAME: &str = "PiDA Tray";
@@ -11,15 +11,23 @@ pub const AUTOSTART_VALUE_NAME: &str = "PiDATray";
 
 // Geometry (egui points)
 pub const FLYOUT_WIDTH: f32 = 360.0;
-/// Outer window reserves 1pt on each side for the card border stroke so the
-/// swapchain never clips the right or bottom hairline.
+/// Stroke of the card frame. egui grows a `Frame` by its stroke size on every
+/// side, so the window must include that growth or the right/bottom border is
+/// clipped by the swap-chain edge.
 pub const CARD_STROKE_WIDTH: f32 = 1.0;
-pub const FLYOUT_OUTER_WIDTH: f32 = FLYOUT_WIDTH + 2.0 * CARD_STROKE_WIDTH;
+/// Transparent bleed around the card so its anti-aliased edge and border never
+/// land exactly on the swap-chain edge.
+pub const CARD_BLEED: f32 = 1.0;
+pub const FLYOUT_OUTER_WIDTH: f32 = FLYOUT_WIDTH + 2.0 * CARD_STROKE_WIDTH + 2.0 * CARD_BLEED;
 pub const FLYOUT_MIN_HEIGHT: f32 = 260.0;
+/// Minimum height accepted on the first open before the content is measured.
+pub const FLYOUT_SHOW_MIN_HEIGHT: f32 = 300.0;
 /// Initial content-hug height before the first frame measures the cards.
 pub const FLYOUT_DEFAULT_HEIGHT: f32 = 720.0;
 /// Upper bound; the actual cap is also clamped to the monitor work area.
 pub const FLYOUT_MAX_HEIGHT: f32 = 900.0;
+/// Where a hidden flyout is parked off every monitor so it stays mapped and warm.
+pub const PARKED_POS: Pos2 = Pos2::new(-32000.0, -32000.0);
 pub const FLYOUT_SCREEN_MARGIN: f32 = 8.0;
 pub const FLYOUT_PADDING: f32 = 12.0;
 pub const FLYOUT_RADIUS: u8 = 12;

@@ -55,13 +55,10 @@ fn main() -> eframe::Result<()> {
         .with_resizable(true)
         .with_min_inner_size([constants::FLYOUT_OUTER_WIDTH, constants::FLYOUT_MIN_HEIGHT])
         .with_max_inner_size([constants::FLYOUT_OUTER_WIDTH, constants::FLYOUT_MAX_HEIGHT])
-        .with_active(false)
         .with_window_level(egui::WindowLevel::AlwaysOnTop)
         .with_taskbar(false)
-        // Keep the window mapped but parked off-screen: hiding it with
-        // `set_visible` leaves a blank swap chain that eframe does not repaint
-        // until an unrelated input event arrives.
-        .with_position([-32000.0, -32000.0])
+        .with_visible(false)
+        .with_position(constants::PARKED_POS)
         .with_icon(Arc::new(app_icon));
 
     let options = eframe::NativeOptions {
@@ -85,66 +82,305 @@ fn main() -> eframe::Result<()> {
 }
 
 #[cfg(windows)]
-static WINDOW_HWND: std::sync::OnceLock<isize> = std::sync::OnceLock::new();
-
-/// Disable DWM non-client rendering so Windows does not draw a 1px grey frame or
-/// rectangular drop shadow around the transparent rounded flyout card.
-#[cfg(windows)]
-pub(crate) fn ensure_borderless_window_policy(frame: &eframe::Frame) {
+fn hwnd_from_frame(frame: &eframe::Frame) -> Option<windows::Win32::Foundation::HWND> {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use std::sync::Once;
     use windows::Win32::Foundation::HWND;
-    use windows::Win32::Graphics::Dwm::{
-        DWMNCRP_DISABLED, DWMWA_NCRENDERING_POLICY, DwmSetWindowAttribute,
-    };
 
-    static APPLIED: Once = Once::new();
-    APPLIED.call_once(|| {
-        let Ok(handle) = frame.window_handle() else {
-            return;
-        };
-        let RawWindowHandle::Win32(win32) = handle.as_raw() else {
-            return;
-        };
-        WINDOW_HWND.set(win32.hwnd.get()).ok();
-        let hwnd = HWND(win32.hwnd.get() as *mut core::ffi::c_void);
-        let policy: i32 = DWMNCRP_DISABLED.0;
-        // SAFETY: `hwnd` is a valid top-level window for the current frame and `policy` matches `i32` attribute size.
-        unsafe {
-            let _ = DwmSetWindowAttribute(
-                hwnd,
-                DWMWA_NCRENDERING_POLICY,
-                (&raw const policy).cast(),
-                size_of::<i32>() as u32,
-            );
-        }
-    });
+    let handle = frame.window_handle().ok()?;
+    let RawWindowHandle::Win32(win32) = handle.as_raw() else {
+        return None;
+    };
+    Some(HWND(win32.hwnd.get() as *mut core::ffi::c_void))
 }
 
-/// Cloak the mapped window so it cannot take focus or appear in Alt+Tab while parked.
+/// DWM draws a rectangular drop shadow plus a 1px border around every window
+/// that has frame styles, even when `decorations(false)` hides the title bar.
+/// Furthermore, `egui-winit` passes `with_undecorated_shadow(true)` on Windows
+/// (ignoring `with_has_shadow(false)`), which triggers winit's `WM_NCCALCSIZE`
+/// 1px top/bottom inset hack (`MARKER_UNDECORATED_SHADOW`). With DWM NC
+/// rendering disabled, that 1px strip renders as a dark line across the top and
+/// shifts the client surface down by 1px.
+///
+/// Subclassing the HWND once to return `0` for `WM_NCCALCSIZE` (leaving the
+/// full window rect as client area) and `1` for `WM_ERASEBKGND` (preventing
+/// white GDI background flashes on move/resize) eliminates both defects cleanly.
 #[cfg(windows)]
-pub(crate) fn set_window_cloaked(cloaked: bool) {
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::Graphics::Dwm::{DWMWA_CLOAK, DwmSetWindowAttribute};
+fn ensure_borderless_window_policy(frame: &eframe::Frame) {
+    use std::sync::atomic::{AtomicIsize, Ordering};
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::Graphics::Dwm::{
+        DWMNCRP_DISABLED, DWMWA_CLOAK, DWMWA_NCRENDERING_POLICY, DWMWA_TRANSITIONS_FORCEDISABLED,
+        DwmSetWindowAttribute,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CallWindowProcW, DefWindowProcW, GWL_EXSTYLE, GWL_STYLE, GWLP_WNDPROC, SWP_FRAMECHANGED,
+        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos,
+        WM_ERASEBKGND, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCPAINT, WNDPROC, WS_BORDER, WS_CAPTION,
+        WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU,
+    };
 
-    let Some(raw) = WINDOW_HWND.get().copied() else {
+    static HOOKED_HWND: AtomicIsize = AtomicIsize::new(0);
+    static ORIG_WNDPROC: AtomicIsize = AtomicIsize::new(0);
+
+    unsafe extern "system" fn borderless_wnd_proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        if msg == WM_NCCALCSIZE && wparam.0 != 0 {
+            return LRESULT(0);
+        }
+        // Claim every non-client paint so Windows never draws a caption, even
+        // if a style write from the windowing layer briefly restores one.
+        if msg == WM_NCACTIVATE {
+            return LRESULT(1);
+        }
+        if msg == WM_NCPAINT {
+            return LRESULT(0);
+        }
+        if msg == WM_ERASEBKGND {
+            return LRESULT(1);
+        }
+        let orig = ORIG_WNDPROC.load(Ordering::Acquire);
+        if orig != 0 {
+            let proc: WNDPROC = unsafe { std::mem::transmute::<isize, WNDPROC>(orig) };
+            unsafe { CallWindowProcW(proc, hwnd, msg, wparam, lparam) }
+        } else {
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+    }
+
+    let Some(hwnd) = hwnd_from_frame(frame) else {
         return;
     };
-    let value: i32 = i32::from(cloaked);
-    let hwnd = HWND(raw as *mut core::ffi::c_void);
-    // SAFETY: the HWND was captured from the live window and `value` lives for the call.
+    let hwnd_val = hwnd.0 as isize;
+
+    if HOOKED_HWND
+        .compare_exchange(0, hwnd_val, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        unsafe {
+            let prev = SetWindowLongPtrW(
+                hwnd,
+                GWLP_WNDPROC,
+                borderless_wnd_proc as *const () as usize as isize,
+            );
+            ORIG_WNDPROC.store(prev, Ordering::Release);
+
+            let disable_transitions: i32 = 1;
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_TRANSITIONS_FORCEDISABLED,
+                &disable_transitions as *const _ as *const core::ffi::c_void,
+                std::mem::size_of::<i32>() as u32,
+            );
+
+            let cloaked: i32 = 1;
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_CLOAK,
+                &cloaked as *const _ as *const core::ffi::c_void,
+                std::mem::size_of::<i32>() as u32,
+            );
+
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                0,
+                0,
+                0,
+                0,
+                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+    }
+
+    // Strip the system frame and the "app window" registration. winit starts
+    // from `WS_CAPTION | WS_BORDER | WS_SYSMENU | WS_SIZEBOX` and sets
+    // `WS_EX_APPWINDOW`, and eframe never forwards `with_taskbar(false)`. The
+    // leftover caption styles let DWM flash a title bar with close/minimise
+    // buttons for a frame or two whenever it repaints the non-client area, and
+    // `WS_EX_APPWINDOW` is why the tray-only process shows up in the taskbar
+    // and Task Manager's app list. winit rewrites styles when its own flags
+    // change, so this is re-applied every frame and only touches the window
+    // when something actually drifted.
+    //
+    // `WS_THICKFRAME` is deliberately kept: it provides the invisible resize
+    // border used to drag the flyout's height.
+    //
+    // The window deliberately stays a plain overlapped window (no `WS_POPUP`):
+    // an owner-less popup changes activation behaviour enough that the flyout
+    // lost foreground on open and its focus-loss auto-hide fired immediately.
+    unsafe {
+        let style =
+            windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
+        let wanted = style
+            & !(WS_CAPTION.0 | WS_BORDER.0 | WS_SYSMENU.0 | WS_MINIMIZEBOX.0 | WS_MAXIMIZEBOX.0);
+        let ex =
+            windows::Win32::UI::WindowsAndMessaging::GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+        let wanted_ex = (ex & !WS_EX_APPWINDOW.0) | WS_EX_TOOLWINDOW.0;
+
+        let mut changed = false;
+        if style != wanted {
+            SetWindowLongPtrW(hwnd, GWL_STYLE, wanted as isize);
+            changed = true;
+        }
+        if ex != wanted_ex {
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, wanted_ex as isize);
+            changed = true;
+        }
+        if changed {
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                0,
+                0,
+                0,
+                0,
+                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+    }
+
+    // Re-applied on every call instead of once: DWM drops the non-client
+    // policy when the window is moved or resized, which is exactly what the
+    // flyout does on each show. The call is cheap.
+    let policy: i32 = DWMNCRP_DISABLED.0;
     unsafe {
         let _ = DwmSetWindowAttribute(
             hwnd,
-            DWMWA_CLOAK,
-            (&raw const value).cast(),
-            size_of::<i32>() as u32,
+            DWMWA_NCRENDERING_POLICY,
+            &policy as *const _ as *const core::ffi::c_void,
+            std::mem::size_of::<i32>() as u32,
         );
     }
 }
 
 #[cfg(not(windows))]
-pub(crate) fn ensure_borderless_window_policy(_frame: &eframe::Frame) {}
+fn ensure_borderless_window_policy(_frame: &eframe::Frame) {}
+
+/// Forces the flyout to the foreground without relying on the windowing
+/// layer's own activation path.
+///
+/// A tray click lands in `explorer.exe`, so this process owns neither the
+/// foreground window nor the last input event, and a plain `SetForegroundWindow`
+/// is refused by the foreground lock. Attaching to the current foreground
+/// thread first makes the call legal, which is what keeps the flyout from being
+/// auto-hidden by its own focus-loss guard a frame after it opens.
+#[cfg(windows)]
+pub(crate) fn focus_flyout_window(frame: &eframe::Frame) {
+    use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow,
+    };
+
+    let Some(hwnd) = hwnd_from_frame(frame) else {
+        return;
+    };
+    unsafe {
+        let foreground = GetForegroundWindow();
+        let foreground_thread = if foreground.0.is_null() {
+            0
+        } else {
+            GetWindowThreadProcessId(foreground, None)
+        };
+        let our_thread = GetCurrentThreadId();
+        let attached = foreground_thread != 0
+            && foreground_thread != our_thread
+            && AttachThreadInput(our_thread, foreground_thread, true).as_bool();
+
+        let _ = SetForegroundWindow(hwnd);
+
+        if attached {
+            let _ = AttachThreadInput(our_thread, foreground_thread, false);
+        }
+    }
+}
 
 #[cfg(not(windows))]
-pub(crate) fn set_window_cloaked(_cloaked: bool) {}
+pub(crate) fn focus_flyout_window(_frame: &eframe::Frame) {}
+
+/// Whether this window actually owns the Win32 foreground.
+///
+/// egui's `viewport().focused` is only as good as the windowing layer's own
+/// bookkeeping, and eframe creates the window with `with_visible(false)`, so
+/// that flag can stay `false` while Windows has long since handed us focus.
+/// The foreground window is the source of truth for the click-away guard.
+#[cfg(windows)]
+pub(crate) fn flyout_has_foreground(frame: &eframe::Frame) -> Option<bool> {
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+
+    let hwnd = hwnd_from_frame(frame)?;
+    let foreground = unsafe { GetForegroundWindow() };
+    Some(foreground == hwnd)
+}
+
+#[cfg(not(windows))]
+pub(crate) fn flyout_has_foreground(_frame: &eframe::Frame) -> Option<bool> {
+    None
+}
+
+/// Moves the parked flyout to its final physical position and uncloaks it in a
+/// single tick, reusing the frame it already painted while hidden.
+///
+/// egui's `OuterPosition`/`Visible` commands are applied after the frame, so
+/// uncloaking alongside them would show the window at its parked coordinates
+/// first. Driving the HWND directly is what removes the extra vsyncs from the
+/// open path; the engine catches up with the new geometry on its next frame.
+#[cfg(windows)]
+pub(crate) fn reveal_flyout_at(frame: &eframe::Frame, x: f32, y: f32, width: f32, height: f32) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        HWND_TOPMOST, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowPos,
+    };
+
+    let Some(hwnd) = hwnd_from_frame(frame) else {
+        return;
+    };
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            x.round() as i32,
+            y.round() as i32,
+            width.round() as i32,
+            height.round() as i32,
+            SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
+    }
+    set_window_cloaked(frame, false);
+    focus_flyout_window(frame);
+}
+
+#[cfg(not(windows))]
+pub(crate) fn reveal_flyout_at(
+    _frame: &eframe::Frame,
+    _x: f32,
+    _y: f32,
+    _width: f32,
+    _height: f32,
+) {
+}
+
+/// Controls DWM cloaking (`DWMWA_CLOAK`) so a mapped window can settle its
+/// size and swap buffers offscreen before DWM composites it onto the desktop.
+#[cfg(windows)]
+pub(crate) fn set_window_cloaked(frame: &eframe::Frame, cloaked: bool) {
+    use windows::Win32::Graphics::Dwm::{DWMWA_CLOAK, DwmSetWindowAttribute};
+
+    let Some(hwnd) = hwnd_from_frame(frame) else {
+        return;
+    };
+    let val: i32 = i32::from(cloaked);
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAK,
+            &val as *const _ as *const core::ffi::c_void,
+            std::mem::size_of::<i32>() as u32,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn set_window_cloaked(_frame: &eframe::Frame, _cloaked: bool) {}
