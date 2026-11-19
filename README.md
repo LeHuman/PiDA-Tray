@@ -31,6 +31,7 @@ Desktop access to server-managed home automation devices should not require keep
 - Cache-first startup: loads the last saved `/api/schema`, device states, and `/api/icon/<path>` PNGs from `%APPDATA%\PiDA-Tray\` before refreshing in the background.
 - After every successful action, re-reads every group's state at 0.5 s, 1 s, 3 s, and 8 s (a newer action restarts the cascade), matching the Android client so fan-out actions and late-reflecting devices converge.
 - Tray icon uses the PiDA mark: full colour while connected, grayscale when offline or unconfigured, and red after a failed action.
+- Device cards use a server-provided `/api/icon/<endpoint>` PNG when available; otherwise a broad category fallback infers a generic icon from device terms (lighting, fan, display, computer, audio, sensor, camera, lock, cover, power, or a neutral generic device).
 - Schema-driven controls preserving server YAML key order: boolean toggles, bounded sliders, numeric steppers, enum pills/dropdowns, string inputs, read-only state readouts, and legacy one-shot action buttons.
 - Collapsible device cards keep large catalogs compact; every card starts collapsed with its first control still visible (button actions render inline in the card header, sliders/steppers/enums/strings on a second line), and the flyout shrinks/grows to fit. Drag the top or bottom edge to resize (height is remembered).
 - Taskbar-anchored dark flyout with focus-loss auto-hide, pin toggle, and optional Windows startup registration (`HKCU\...\Run`).

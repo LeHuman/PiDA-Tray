@@ -7,9 +7,15 @@ use crate::api::{ParamKind, Schema, action_path};
 pub enum IconKind {
     Light,
     Fan,
-    Monitor,
+    Display,
     Computer,
+    Audio,
+    Sensor,
+    Camera,
+    Lock,
+    Cover,
     Power,
+    Generic,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -129,18 +135,70 @@ fn leaf(path: &str) -> &str {
 }
 
 pub fn infer_icon(leaf_name: &str) -> IconKind {
-    let l = leaf_name.to_ascii_lowercase();
-    let has = |needles: &[&str]| needles.iter().any(|n| l.contains(n));
-    if has(&["light", "lamp"]) {
+    let tokens: Vec<String> = leaf_name
+        .to_ascii_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect();
+    let has = |terms: &[&str]| {
+        tokens.iter().any(|token| {
+            terms
+                .iter()
+                .any(|term| token.as_str() == *term || token.strip_suffix('s') == Some(*term))
+        })
+    };
+
+    if has(&["light", "lamp", "bulb", "led", "strip", "sconce"]) {
         IconKind::Light
-    } else if has(&["fan"]) {
+    } else if has(&["fan", "vent", "hvac", "breeze"]) {
         IconKind::Fan
-    } else if has(&["monitor", "tv"]) {
-        IconKind::Monitor
-    } else if has(&["computer", "pc"]) {
+    } else if has(&[
+        "monitor",
+        "display",
+        "screen",
+        "tv",
+        "television",
+        "projector",
+        "beamer",
+    ]) {
+        IconKind::Display
+    } else if has(&["computer", "pc", "desktop", "laptop", "server", "nas"]) {
         IconKind::Computer
-    } else {
+    } else if has(&["speaker", "audio", "sound", "music", "amp", "receiver"]) {
+        IconKind::Audio
+    } else if has(&["camera", "cam", "webcam", "doorbell"]) {
+        IconKind::Camera
+    } else if has(&["lock", "door", "gate", "garage", "deadbolt"]) {
+        IconKind::Lock
+    } else if has(&["blind", "curtain", "shade", "shutter", "cover"]) {
+        IconKind::Cover
+    } else if has(&[
+        "sensor",
+        "thermostat",
+        "climate",
+        "temperature",
+        "humidity",
+        "weather",
+        "co2",
+        "air",
+        "quality",
+    ]) {
+        IconKind::Sensor
+    } else if has(&[
+        "power",
+        "plug",
+        "outlet",
+        "socket",
+        "relay",
+        "heater",
+        "kettle",
+        "appliance",
+        "switch",
+    ]) {
         IconKind::Power
+    } else {
+        IconKind::Generic
     }
 }
 
@@ -327,12 +385,20 @@ mod tests {
     }
 
     #[test]
-    fn infers_icons() {
-        assert_eq!(infer_icon("desk_lamp"), IconKind::Light);
+    fn infers_icons_from_generic_device_terms() {
+        assert_eq!(infer_icon("lamp"), IconKind::Light);
+        assert_eq!(infer_icon("night_lights"), IconKind::Light);
         assert_eq!(infer_icon("ceiling_fan"), IconKind::Fan);
-        assert_eq!(infer_icon("tv"), IconKind::Monitor);
+        assert_eq!(infer_icon("media_tv"), IconKind::Display);
+        assert_eq!(infer_icon("projector"), IconKind::Display);
         assert_eq!(infer_icon("gaming_pc"), IconKind::Computer);
+        assert_eq!(infer_icon("home_server"), IconKind::Computer);
+        assert_eq!(infer_icon("living_room_speaker"), IconKind::Audio);
+        assert_eq!(infer_icon("air_quality"), IconKind::Sensor);
+        assert_eq!(infer_icon("front_door"), IconKind::Lock);
+        assert_eq!(infer_icon("window_blinds"), IconKind::Cover);
         assert_eq!(infer_icon("heater"), IconKind::Power);
+        assert_eq!(infer_icon("unknown_widget"), IconKind::Generic);
     }
 
     #[test]

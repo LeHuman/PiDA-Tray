@@ -18,6 +18,7 @@ defaults, comments, tests, docs, or git history. Use placeholders: `http://192.0
 - Every successful dispatch starts the Android-style settle cascade (`schedule_settle`): refresh all group states at +0.5/1/3/8 s, last action wins.
 - Device cards are collapsed by default (`DevicesView::expanded`). Collapsed cards render their first numeric/enum/string control on a second line; a first legacy action renders inline in the header between the title and the switch/chevron.
 - Use `ui::button::pill_button` for custom buttons; do not use explicit `.fill()` on `egui::Button` or hover feedback is lost.
+- Device icons: a server PNG from `/api/icon/<endpoint>` always wins. The local fallback must stay generic and privacy-neutral — broad device-category terms only, never personal rooms/devices.
 - Sync `InputState::focused` from `flyout_has_foreground` so egui draws the text caret and focus rings correctly.
 - Tray icon/tooltip updates are diff-cached.
 - Pure logic lives in `config`, `api`, `catalog`, `cache`, `poller` helpers, and `tray` placement so it is unit-testable.

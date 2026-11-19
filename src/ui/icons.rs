@@ -20,9 +20,15 @@ pub fn draw_kind(p: &Painter, kind: IconKind, rect: Rect, color: Color32) {
     match kind {
         IconKind::Light => light(p, rect, color),
         IconKind::Fan => fan(p, rect, color),
-        IconKind::Monitor => monitor(p, rect, color),
+        IconKind::Display => display(p, rect, color),
         IconKind::Computer => computer(p, rect, color),
+        IconKind::Audio => audio(p, rect, color),
+        IconKind::Sensor => sensor(p, rect, color),
+        IconKind::Camera => camera(p, rect, color),
+        IconKind::Lock => lock(p, rect, color),
+        IconKind::Cover => cover(p, rect, color),
         IconKind::Power => power(p, rect, color),
+        IconKind::Generic => generic(p, rect, color),
     }
 }
 
@@ -63,7 +69,7 @@ pub fn fan(p: &Painter, rect: Rect, color: Color32) {
     }
 }
 
-pub fn monitor(p: &Painter, rect: Rect, color: Color32) {
+pub fn display(p: &Painter, rect: Rect, color: Color32) {
     let (c, s) = (rect.center(), stroke(rect, color));
     let screen = Rect::from_center_size(
         c - vec2(0.0, rect.height() * 0.06),
@@ -97,6 +103,109 @@ pub fn computer(p: &Painter, rect: Rect, color: Color32) {
         rect.width() * 0.04,
         color,
     );
+}
+
+pub fn audio(p: &Painter, rect: Rect, color: Color32) {
+    let (c, s) = (rect.center(), stroke(rect, color));
+    let body = Rect::from_center_size(c, vec2(rect.width() * 0.48, rect.height() * 0.78));
+    p.rect_stroke(body, 3.0, s, StrokeKind::Middle);
+    p.circle_stroke(
+        pos2(c.x, body.top() + rect.height() * 0.20),
+        rect.width() * 0.10,
+        s,
+    );
+    p.circle_stroke(
+        pos2(c.x, body.bottom() - rect.height() * 0.17),
+        rect.width() * 0.15,
+        s,
+    );
+}
+
+pub fn sensor(p: &Painter, rect: Rect, color: Color32) {
+    let (c, s) = (rect.center(), stroke(rect, color));
+    let dot = c - vec2(rect.width() * 0.15, 0.0);
+    p.circle_filled(dot, rect.width() * 0.07, color);
+    for r in [0.22, 0.36] {
+        p.add(Shape::line(
+            arc(dot, rect.width() * r, -PI / 4.0, PI / 4.0),
+            s,
+        ));
+    }
+}
+
+pub fn camera(p: &Painter, rect: Rect, color: Color32) {
+    let (c, s) = (rect.center(), stroke(rect, color));
+    let body = Rect::from_center_size(c, vec2(rect.width() * 0.78, rect.height() * 0.52));
+    p.rect_stroke(body, 3.0, s, StrokeKind::Middle);
+    p.circle_stroke(c, rect.width() * 0.15, s);
+    p.circle_filled(
+        pos2(
+            body.right() - rect.width() * 0.10,
+            body.top() + rect.height() * 0.10,
+        ),
+        rect.width() * 0.03,
+        color,
+    );
+}
+
+pub fn lock(p: &Painter, rect: Rect, color: Color32) {
+    let (c, s) = (rect.center(), stroke(rect, color));
+    let body = Rect::from_center_size(
+        c + vec2(0.0, rect.height() * 0.10),
+        vec2(rect.width() * 0.60, rect.height() * 0.46),
+    );
+    let shackle_center = pos2(c.x, body.top());
+    p.add(Shape::line(
+        arc(shackle_center, rect.width() * 0.22, 0.0, PI),
+        s,
+    ));
+    p.rect_stroke(body, 3.0, s, StrokeKind::Middle);
+    p.circle_filled(
+        pos2(c.x, body.center().y - rect.height() * 0.02),
+        rect.width() * 0.045,
+        color,
+    );
+    p.line_segment(
+        [
+            pos2(c.x, body.center().y),
+            pos2(c.x, body.center().y + rect.height() * 0.10),
+        ],
+        s,
+    );
+}
+
+pub fn cover(p: &Painter, rect: Rect, color: Color32) {
+    let (c, s) = (rect.center(), stroke(rect, color));
+    let frame = Rect::from_center_size(c, vec2(rect.width() * 0.70, rect.height() * 0.66));
+    p.rect_stroke(frame, 2.0, s, StrokeKind::Middle);
+    for i in 1..=3 {
+        let y = frame.top() + frame.height() * i as f32 / 4.0;
+        p.line_segment([pos2(frame.left(), y), pos2(frame.right(), y)], s);
+    }
+    let cord_x = frame.right() + rect.width() * 0.08;
+    p.line_segment(
+        [
+            pos2(cord_x, frame.top()),
+            pos2(cord_x, frame.bottom() + rect.height() * 0.06),
+        ],
+        s,
+    );
+}
+
+pub fn generic(p: &Painter, rect: Rect, color: Color32) {
+    let (c, s) = (rect.center(), stroke(rect, color));
+    let body = Rect::from_center_size(c, vec2(rect.width() * 0.52, rect.height() * 0.52));
+    p.rect_stroke(body, 4.0, s, StrokeKind::Middle);
+    p.circle_filled(c, rect.width() * 0.08, color);
+    for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
+        let dir = vec2(dx, dy);
+        let edge = if dx != 0.0 {
+            body.width() * 0.5
+        } else {
+            body.height() * 0.5
+        };
+        p.line_segment([c + dir * edge, c + dir * (edge + rect.width() * 0.10)], s);
+    }
 }
 
 pub fn refresh(p: &Painter, rect: Rect, color: Color32) {
