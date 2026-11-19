@@ -1,5 +1,6 @@
 //! `PiDaTrayApp`: reveal/park lifecycle, focus-loss grace, and the card shell.
 
+mod button;
 mod devices;
 mod header;
 mod icons;
@@ -11,7 +12,7 @@ use std::{
 };
 
 use eframe::egui::{
-    self, Color32, CornerRadius, Margin, RichText, Stroke, StrokeKind, ViewportCommand, vec2,
+    self, CornerRadius, Margin, RichText, Stroke, StrokeKind, ViewportCommand, vec2,
 };
 
 use crate::{
@@ -25,6 +26,8 @@ use crate::{
     theme::{self, border_card},
     tray::{self, StatusKey, TrayAction, TrayController},
 };
+
+use button::{ButtonKind, pill_button};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
@@ -198,7 +201,7 @@ impl PiDaTrayApp {
         }
 
         let previous_height = self.last_viewport_height;
-        let desired = self.manual_height.unwrap_or(FLYOUT_DEFAULT_HEIGHT);
+        let desired = self.manual_height.unwrap_or(previous_height);
         let pos = self.compute_placement(ctx, desired);
         let target = desired.clamp(FLYOUT_MIN_HEIGHT, self.max_height);
 
@@ -362,6 +365,7 @@ impl PiDaTrayApp {
     fn draw(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         let snap = self.shared.snapshot();
+        let mut scroll_delta = 0.0f32;
 
         let card_response = egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
@@ -427,15 +431,15 @@ impl PiDaTrayApp {
                                                 RichText::new("No server configured")
                                                     .color(PALETTE.on_surface_variant),
                                             );
-                                            let btn = egui::Button::new(
-                                                RichText::new("Configure Server URL")
-                                                    .strong()
-                                                    .color(Color32::WHITE),
+                                            if pill_button(
+                                                ui,
+                                                RichText::new("Configure Server URL").strong(),
+                                                vec2(0.0, 32.0),
+                                                6,
+                                                ButtonKind::Primary,
                                             )
-                                            .fill(PALETTE.primary)
-                                            .stroke(Stroke::NONE)
-                                            .corner_radius(CornerRadius::same(6));
-                                            if ui.add(btn).clicked() {
+                                            .clicked()
+                                            {
                                                 self.view = View::Settings;
                                             }
                                         } else {
@@ -450,23 +454,10 @@ impl PiDaTrayApp {
                                                     .size(11.0),
                                                 );
                                             }
-                                            let extra =
-                                                (if snap.banner.is_some() { 46.0 } else { 0.0 })
-                                                    + (if snap.connection == Connection::Offline
-                                                        && !snap.catalog.is_empty()
-                                                    {
-                                                        24.0
-                                                    } else {
-                                                        0.0
-                                                    });
-                                            let scroll_max = if self.manual_height.is_some() {
-                                                ui.available_height().max(120.0)
-                                            } else {
-                                                (self.max_height - 84.0 - extra).max(120.0)
-                                            };
-                                            egui::ScrollArea::vertical()
+                                            let scroll_max = ui.available_height().max(120.0);
+                                            let scroll = egui::ScrollArea::vertical()
                                                 .max_height(scroll_max)
-                                                .auto_shrink([false, true])
+                                                .auto_shrink([false, false])
                                                 .show(ui, |ui| {
                                                     self.devices.show(
                                                         ui,
@@ -475,11 +466,13 @@ impl PiDaTrayApp {
                                                         &self.poller,
                                                     )
                                                 });
+                                            scroll_delta =
+                                                scroll.content_size.y - scroll.inner_rect.height();
                                         }
                                     });
                             }
                         }
-                        (head, close_settings, reset_size)
+                        (head, close_settings, reset_size, scroll_delta)
                     })
             });
 
@@ -495,7 +488,7 @@ impl PiDaTrayApp {
             StrokeKind::Inside,
         );
 
-        let (head, close_settings, reset_size) = card_response.inner.inner;
+        let (head, close_settings, reset_size, scroll_delta) = card_response.inner.inner;
         if reset_size {
             self.manual_height = None;
             self.last_viewport_height = FLYOUT_DEFAULT_HEIGHT;
@@ -556,13 +549,15 @@ impl PiDaTrayApp {
             self.place(&ctx, height);
         }
 
-        // Fixed panel height (or the user's dragged height). Measuring the
-        // ScrollArea inside the current window gives the window height back,
-        // not the catalogue's natural height, so content-hugging would let the
-        // flyout shrink once and never grow again when devices load.
+        // Natural height = current card height + how much the scroll content
+        // overflows (or underflows) its viewport. With a non-shrinking viewport
+        // this is independent of the current window height, so collapsing a
+        // card genuinely shrinks the flyout and expanding it grows again.
+        let card_h = card_response.inner.response.rect.height();
+        let natural_h = (card_h + scroll_delta).ceil().max(FLYOUT_MIN_HEIGHT);
         let measured_h = self
             .manual_height
-            .unwrap_or(FLYOUT_DEFAULT_HEIGHT)
+            .unwrap_or(natural_h)
             .clamp(FLYOUT_MIN_HEIGHT, self.max_height);
 
         if (measured_h - self.last_viewport_height).abs() > 1.5 {
@@ -576,8 +571,8 @@ impl PiDaTrayApp {
                 self.place(&ctx, measured_h);
             } else {
                 self.reveal_phase = RevealPhase::Settling;
-                ctx.request_repaint();
             }
+            ctx.request_repaint();
         } else if self.reveal_phase == RevealPhase::Settling {
             self.place(&ctx, self.last_viewport_height);
             self.parked = false;

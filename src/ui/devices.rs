@@ -1,7 +1,11 @@
 //! Scrollable device cards: collapsible groups with toggle, sliders, steppers,
 //! enum pills/dropdown, strings, status readouts, and action tiles.
 
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Instant,
+};
 
 use eframe::egui::{
     self, Align, Color32, ColorImage, CornerRadius, Layout, Margin, RichText, Sense, Stroke,
@@ -9,10 +13,15 @@ use eframe::egui::{
 };
 use serde_json::{Value, json};
 
-use super::icons;
+use super::{
+    button::{ButtonKind, pill_button},
+    icons,
+};
 use crate::{
     api::{ApiError, ParamKind},
-    catalog::{DeviceGroup, EnumParam, RangeParam, ReadoutSpec, SetActionSpec, prettify},
+    catalog::{
+        DeviceGroup, EnumParam, LegacyActionSpec, RangeParam, ReadoutSpec, SetActionSpec, prettify,
+    },
     constants::{CARD_RADIUS, PALETTE, SLIDER_DEBOUNCE},
     poller::{Poller, Shared, Snapshot, StateMap},
     theme::{border_subtle, hover_overlay},
@@ -42,8 +51,8 @@ pub struct DevicesView {
     textures: HashMap<String, (usize, Option<TextureHandle>)>,
     pending: HashMap<(String, String), PendingNumeric>,
     string_edits: HashMap<(String, String), String>,
-    /// Device cards the user has collapsed (session-local).
-    collapsed: std::collections::HashSet<String>,
+    /// Device cards the user has expanded (session-local; collapsed by default).
+    expanded: HashSet<String>,
 }
 
 fn decode_png(bytes: &[u8]) -> Result<ColorImage, ApiError> {
@@ -56,24 +65,50 @@ fn decode_png(bytes: &[u8]) -> Result<ColorImage, ApiError> {
 
 fn switch(ui: &mut Ui, on: bool, busy: bool) -> bool {
     let (rect, resp) = ui.allocate_exact_size(vec2(44.0, 24.0), Sense::click());
+    let hovered = resp.hovered();
+    let pressed = resp.is_pointer_button_down_on();
+    if hovered {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+
     let t = ui.ctx().animate_bool(resp.id, on);
-    let track = if on {
+    let mut track = if on {
         PALETTE.primary
     } else {
         PALETTE.surface_container_high
     };
+    if hovered {
+        track = track.blend(hover_overlay());
+    }
+    if pressed {
+        track = track.gamma_multiply(0.82);
+    }
     ui.painter().rect_filled(rect, 12.0, track);
     if !on {
         ui.painter().rect_stroke(
             rect,
             12.0,
-            Stroke::new(1.5, PALETTE.outline),
+            Stroke::new(
+                1.5,
+                if hovered {
+                    PALETTE.focus
+                } else {
+                    PALETTE.outline
+                },
+            ),
+            egui::StrokeKind::Inside,
+        );
+    } else if hovered {
+        ui.painter().rect_stroke(
+            rect,
+            12.0,
+            Stroke::new(1.0, PALETTE.focus),
             egui::StrokeKind::Inside,
         );
     }
     let r = 6.5 + 2.5 * t;
     let x = egui::lerp((rect.left() + 12.0)..=(rect.right() - 12.0), t);
-    let knob = if on {
+    let knob = if on || hovered {
         Color32::WHITE
     } else {
         PALETTE.on_surface_variant
@@ -89,10 +124,11 @@ fn switch(ui: &mut Ui, on: bool, busy: bool) -> bool {
 fn chevron_button(ui: &mut Ui, expanded: bool) -> bool {
     let (rect, resp) = ui.allocate_exact_size(vec2(24.0, 24.0), Sense::click());
     if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         ui.painter()
             .rect_filled(rect, CornerRadius::same(12), hover_overlay());
     }
-    let color = if resp.hovered() {
+    let color = if resp.hovered() || resp.is_pointer_button_down_on() {
         Color32::WHITE
     } else {
         PALETTE.on_surface_variant
@@ -225,7 +261,10 @@ impl DevicesView {
             ui.label(RichText::new(msg).color(PALETTE.on_surface_variant));
             return;
         }
-        for group in snap.catalog.iter() {
+        for (index, group) in snap.catalog.iter().enumerate() {
+            if index > 0 {
+                ui.add_space(6.0);
+            }
             self.card(ui, group, snap, shared, poller);
         }
         self.flush_due(ui.ctx(), shared, poller);
@@ -268,7 +307,7 @@ impl DevicesView {
     ) {
         let state = snap.states.get(&group.path);
         let tex = self.texture_for(ui.ctx(), snap, &group.path);
-        let expanded = !self.collapsed.contains(&group.path);
+        let expanded = self.expanded.contains(&group.path);
         let mut toggle_collapse = false;
 
         egui::Frame::new()
@@ -346,6 +385,7 @@ impl DevicesView {
                 });
 
                 if !expanded {
+                    self.first_control(ui, group, snap, state, shared, poller);
                     return;
                 }
 
@@ -381,26 +421,7 @@ impl DevicesView {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
                             for l in row {
-                                let busy = snap.in_flight.contains(&l.action_path);
-                                let label = if busy {
-                                    format!("{} …", l.label)
-                                } else {
-                                    l.label.clone()
-                                };
-                                let btn = egui::Button::new(
-                                    RichText::new(label).size(11.5).color(PALETTE.on_surface),
-                                )
-                                .fill(PALETTE.surface_container_high)
-                                .stroke(Stroke::new(1.0, border_subtle()))
-                                .corner_radius(CornerRadius::same(8))
-                                .min_size(vec2(tile_width, 32.0));
-                                if ui
-                                    .add_enabled(!busy, btn)
-                                    .on_hover_text(&l.action_path)
-                                    .clicked()
-                                {
-                                    poller.press(shared, &group.path, &l.action_path);
-                                }
+                                action_tile(ui, group, snap, shared, poller, l, tile_width, 32.0);
                             }
                         });
                     }
@@ -408,12 +429,42 @@ impl DevicesView {
             });
         if toggle_collapse {
             if expanded {
-                self.collapsed.insert(group.path.clone());
+                self.expanded.remove(&group.path);
             } else {
-                self.collapsed.remove(&group.path);
+                self.expanded.insert(group.path.clone());
             }
         }
-        ui.add_space(6.0);
+    }
+
+    /// Collapsed cards still expose the first interactive control, matching the
+    /// phone app's compact device tiles.
+    fn first_control(
+        &mut self,
+        ui: &mut Ui,
+        group: &DeviceGroup,
+        snap: &Snapshot,
+        state: Option<&StateMap>,
+        shared: &Arc<Shared>,
+        poller: &Poller,
+    ) {
+        if let Some(set) = &group.set {
+            if let Some(r) = set.range_params.first() {
+                self.numeric_control(ui, group, set, r, state, shared, poller);
+                return;
+            }
+            if let Some(e) = set.enum_params.first() {
+                enum_control(ui, group, set, e, state, shared, poller);
+                return;
+            }
+            if let Some(name) = set.string_params.first() {
+                self.string_control(ui, group, set, name, state, shared, poller);
+                return;
+            }
+        }
+        if let Some(action) = group.legacy.first() {
+            let width = ui.available_width();
+            action_tile(ui, group, snap, shared, poller, action, width, 34.0);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -608,6 +659,40 @@ impl DevicesView {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn action_tile(
+    ui: &mut Ui,
+    group: &DeviceGroup,
+    snap: &Snapshot,
+    shared: &Arc<Shared>,
+    poller: &Poller,
+    action: &LegacyActionSpec,
+    width: f32,
+    height: f32,
+) {
+    let busy = snap.in_flight.contains(&action.action_path);
+    let label = if busy {
+        format!("{} …", action.label)
+    } else {
+        action.label.clone()
+    };
+    let resp = ui
+        .add_enabled_ui(!busy, |ui| {
+            pill_button(
+                ui,
+                RichText::new(label).size(11.5),
+                vec2(width, height),
+                8,
+                ButtonKind::Secondary,
+            )
+        })
+        .inner
+        .on_hover_text(&action.action_path);
+    if resp.clicked() {
+        poller.press(shared, &group.path, &action.action_path);
+    }
+}
+
 fn readout_row(ui: &mut Ui, ro: &ReadoutSpec, state: Option<&StateMap>) {
     ui.add_space(1.0);
     ui.horizontal_wrapped(|ui| {
@@ -674,24 +759,16 @@ fn enum_control(
                     for opt in &e.options {
                         let selected = current == Some(opt);
                         let text = option_label(opt);
-                        let btn =
-                            egui::Button::new(RichText::new(text).size(11.5).color(if selected {
-                                Color32::WHITE
-                            } else {
-                                PALETTE.on_surface
-                            }))
-                            .fill(if selected {
-                                PALETTE.primary
-                            } else {
-                                PALETTE.surface_container_high
-                            })
-                            .stroke(if selected {
-                                Stroke::NONE
-                            } else {
-                                Stroke::new(1.0, border_subtle())
-                            })
-                            .corner_radius(CornerRadius::same(255));
-                        if ui.add(btn).clicked() && !selected {
+                        if pill_button(
+                            ui,
+                            RichText::new(text).size(11.5),
+                            vec2(0.0, 24.0),
+                            255,
+                            ButtonKind::Segment { active: selected },
+                        )
+                        .clicked()
+                            && !selected
+                        {
                             poller.set_param(
                                 shared,
                                 &group.path,
@@ -712,10 +789,11 @@ fn enum_control(
                 vec2(control_width, 24.0),
                 Layout::left_to_right(Align::Center),
                 |ui| {
-                    egui::ComboBox::from_id_salt((&set.action_path, &e.name))
+                    let combo = egui::ComboBox::from_id_salt((&set.action_path, &e.name))
                         .width(control_width)
                         .selected_text(shown)
                         .show_ui(ui, |ui| {
+                            ui.visuals_mut().interact_cursor = Some(egui::CursorIcon::PointingHand);
                             for opt in &e.options {
                                 let selected = current == Some(opt);
                                 if ui.selectable_label(selected, option_label(opt)).clicked()
@@ -732,6 +810,9 @@ fn enum_control(
                                 }
                             }
                         });
+                    if combo.response.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
                 },
             );
         }

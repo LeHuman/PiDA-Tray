@@ -156,7 +156,7 @@ mod tests {
     #[test]
     fn palette_text_is_readable_on_surface() {
         assert!(contrast_ratio(PALETTE.on_surface, PALETTE.surface) >= 7.0);
-        assert!(contrast_ratio(PALETTE.on_primary, PALETTE.primary) >= 4.5);
+        assert!(contrast_ratio(Color32::WHITE, PALETTE.primary) >= 4.5);
         assert!(contrast_ratio(PALETTE.error, PALETTE.error_surface) >= 4.5);
     }
 

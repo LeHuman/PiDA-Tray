@@ -62,7 +62,6 @@ pub struct Palette {
     pub muted: Color32,
     pub primary: Color32,
     pub focus: Color32,
-    pub on_primary: Color32,
     pub error: Color32,
     pub error_surface: Color32,
     pub ok: Color32,
@@ -81,8 +80,7 @@ pub const PALETTE: Palette = Palette {
     muted: Color32::from_rgb(0x8D, 0x95, 0xA5),   // #8D95A5
     primary: Color32::from_rgb(0x25, 0x63, 0xEB), // #2563EB
     focus: Color32::from_rgb(0x60, 0xA5, 0xFA),   // #60A5FA
-    on_primary: Color32::WHITE,
-    error: Color32::from_rgb(0xF8, 0x71, 0x71), // #F87171
+    error: Color32::from_rgb(0xF8, 0x71, 0x71),   // #F87171
     error_surface: Color32::from_rgb(0x2B, 0x16, 0x1B),
     ok: Color32::from_rgb(0x10, 0xB9, 0x81),   // #10B981
     warn: Color32::from_rgb(0xF5, 0x9E, 0x0B), // #F59E0B

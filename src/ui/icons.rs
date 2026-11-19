@@ -175,9 +175,9 @@ pub fn chevron(p: &Painter, rect: Rect, color: Color32, expanded: bool) {
     let (c, s) = (rect.center(), stroke(rect, color));
     let d = rect.width() * 0.20;
     let (y_outer, y_tip) = if expanded {
-        (-d * 0.5, d * 0.45)
-    } else {
         (d * 0.5, -d * 0.45)
+    } else {
+        (-d * 0.5, d * 0.45)
     };
     p.add(Shape::line(
         vec![

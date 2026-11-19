@@ -11,8 +11,10 @@ use crate::{
     config::{normalize_server_url, set_autostart},
     constants::{FLYOUT_RADIUS, FLYOUT_WIDTH, IDLE_POLL_CHOICES, PALETTE},
     poller::{Command, Poller, Shared},
-    theme::{border_subtle, hover_overlay},
+    theme::border_subtle,
 };
+
+use super::button::{ButtonKind, pill_button};
 
 #[derive(Default)]
 pub struct SettingsView {
@@ -93,11 +95,16 @@ impl SettingsView {
 
         let mut submit = false;
 
+        // All clickable settings controls get a pointing cursor.
+        ui.style_mut().visuals.interact_cursor = Some(egui::CursorIcon::PointingHand);
+
+        let footer_h = 52.0;
         Frame::new()
             .inner_margin(Margin::symmetric(12, 12))
             .show(ui, |ui| {
                 ui.set_width(FLYOUT_WIDTH - 24.0);
                 ui.spacing_mut().item_spacing = Vec2::new(0.0, 10.0);
+                ui.style_mut().visuals.interact_cursor = Some(egui::CursorIcon::PointingHand);
 
                 // 1. Server URL
                 ui.vertical(|ui| {
@@ -210,31 +217,28 @@ impl SettingsView {
 
                 // 3. Cache + window size controls
                 ui.horizontal_wrapped(|ui| {
-                    let reset = egui::Button::new(
-                        RichText::new("Reset flyout size")
-                            .size(11.5)
-                            .color(PALETTE.on_surface_variant),
+                    if pill_button(
+                        ui,
+                        RichText::new("Reset flyout size").size(11.5),
+                        Vec2::new(0.0, 28.0),
+                        6,
+                        ButtonKind::Secondary,
                     )
-                    .fill(hover_overlay())
-                    .stroke(Stroke::new(1.0, border_subtle()))
-                    .corner_radius(CornerRadius::same(6));
-                    if ui
-                        .add(reset)
-                        .on_hover_text("Return to a height that fits the device cards")
-                        .clicked()
+                    .on_hover_text("Return to the default 720 pt height")
+                    .clicked()
                     {
                         out.reset_size = true;
                     }
 
-                    let btn = egui::Button::new(
-                        RichText::new("Clear cached schema & icons")
-                            .size(11.5)
-                            .color(PALETTE.on_surface_variant),
+                    if pill_button(
+                        ui,
+                        RichText::new("Clear cached schema & icons").size(11.5),
+                        Vec2::new(0.0, 28.0),
+                        6,
+                        ButtonKind::Secondary,
                     )
-                    .fill(hover_overlay())
-                    .stroke(Stroke::new(1.0, border_subtle()))
-                    .corner_radius(CornerRadius::same(6));
-                    if ui.add(btn).clicked() {
+                    .clicked()
+                    {
                         poller.send(Command::ClearCache);
                     }
                 });
@@ -244,6 +248,13 @@ impl SettingsView {
             self.reset();
             out.close = true;
             return out;
+        }
+
+        // Push the action bar to the bottom of the card so it does not float
+        // directly under the form when the flyout is taller than the content.
+        let remaining = (ui.available_height() - footer_h).max(0.0);
+        if remaining > 0.0 {
+            ui.add_space(remaining);
         }
 
         // Bottom footer action bar
@@ -270,32 +281,29 @@ impl SettingsView {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.spacing_mut().item_spacing = Vec2::new(8.0, 0.0);
 
-                    let save_btn = egui::Button::new(
-                        RichText::new("Save")
-                            .size(12.0)
-                            .strong()
-                            .color(PALETTE.on_primary),
+                    if pill_button(
+                        ui,
+                        RichText::new("Save").size(12.0).strong(),
+                        Vec2::new(66.0, 30.0),
+                        6,
+                        ButtonKind::Primary,
                     )
-                    .fill(PALETTE.primary)
-                    .stroke(Stroke::NONE)
-                    .corner_radius(CornerRadius::same(6))
-                    .min_size(Vec2::new(66.0, 30.0));
-                    if ui.add(save_btn).clicked() && self.save(shared, poller) {
+                    .clicked()
+                        && self.save(shared, poller)
+                    {
                         self.reset();
                         out.close = true;
                     }
 
-                    let cancel_btn = egui::Button::new(
-                        RichText::new("Cancel")
-                            .size(12.0)
-                            .strong()
-                            .color(PALETTE.on_surface_variant),
+                    if pill_button(
+                        ui,
+                        RichText::new("Cancel").size(12.0).strong(),
+                        Vec2::new(62.0, 30.0),
+                        6,
+                        ButtonKind::Ghost,
                     )
-                    .fill(Color32::TRANSPARENT)
-                    .stroke(Stroke::NONE)
-                    .corner_radius(CornerRadius::same(6))
-                    .min_size(Vec2::new(62.0, 30.0));
-                    if ui.add(cancel_btn).clicked() {
+                    .clicked()
+                    {
                         self.reset();
                         out.close = true;
                     }
