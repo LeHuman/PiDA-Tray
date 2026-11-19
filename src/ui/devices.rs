@@ -36,6 +36,8 @@ const TILE_COLUMNS: usize = 3;
 const TILE_STRIP_WIDTH: f32 = 22.0;
 const LONG_PRESS: Duration = Duration::from_millis(280);
 const CLICK_AWAY_GRACE: Duration = Duration::from_millis(150);
+const EXPAND_ANIMATION: f32 = 0.18;
+const EXPANDED_HEIGHT_GUESS: f32 = 240.0;
 
 struct PressState {
     started: Instant,
@@ -60,6 +62,13 @@ pub struct DevicesView {
     /// At most one tile is expanded; expansion renders full width in place.
     expanded: Option<String>,
     expanded_at: Option<Instant>,
+    /// The card stays in the layout while it animates closed.
+    closing: bool,
+    /// Full card height measured while rendering, keyed by device path.
+    expanded_height: Option<(String, f32)>,
+    /// Last animated openness of the expanded card, used to suppress the
+    /// scrollbar flash while the flyout height catches up.
+    last_openness: f32,
 }
 
 fn decode_png(bytes: &[u8]) -> Result<ColorImage, ApiError> {
@@ -294,7 +303,14 @@ fn has_more(group: &DeviceGroup) -> bool {
 impl DevicesView {
     pub fn collapse_expanded(&mut self) {
         self.expanded = None;
+        self.closing = false;
         self.press.clear();
+    }
+
+    /// True while the expanded card is mid-reveal; the flyout height is still
+    /// catching up, so callers can hide the transient scrollbar.
+    pub fn is_animating(&self) -> bool {
+        self.expanded.is_some() && self.last_openness < 0.999
     }
 
     pub fn flush_all(&mut self, shared: &Shared, poller: &Poller) {
@@ -323,6 +339,13 @@ impl DevicesView {
         // Rows are spaced explicitly; egui's inherited vertical item spacing
         // would otherwise add a trailing gap under the last row.
         ui.spacing_mut().item_spacing.y = 0.0;
+        let openness = ui.ctx().animate_bool_with_time_and_easing(
+            ui.scope_id().with("device-card-open"),
+            self.expanded.is_some() && !self.closing,
+            EXPAND_ANIMATION,
+            egui::emath::easing::cubic_out,
+        );
+        self.last_openness = openness;
         let mut row: Vec<&DeviceGroup> = Vec::with_capacity(TILE_COLUMNS);
         let mut expanded_rect = None;
         let mut expand_request = None;
@@ -342,8 +365,15 @@ impl DevicesView {
                 if needs_gap {
                     ui.add_space(TILE_GAP);
                 }
-                let response =
-                    self.expanded_card(ui, group, snap, shared, poller, &mut collapse_request);
+                let response = self.expanded_animated(
+                    ui,
+                    group,
+                    snap,
+                    shared,
+                    poller,
+                    openness,
+                    &mut collapse_request,
+                );
                 expanded_rect = Some(response);
                 needs_gap = true;
             } else {
@@ -370,10 +400,15 @@ impl DevicesView {
             play(shared, UiSound::Open);
             self.expanded = Some(path);
             self.expanded_at = Some(now);
+            self.closing = false;
         } else if collapse_request {
-            play(shared, UiSound::Close);
-            self.expanded = None;
+            if !self.closing {
+                play(shared, UiSound::Close);
+                self.closing = true;
+                self.expanded_at = None;
+            }
         } else if let Some(rect) = expanded_rect
+            && !self.closing
             && self
                 .expanded_at
                 .is_none_or(|t| now.duration_since(t) >= CLICK_AWAY_GRACE)
@@ -382,8 +417,13 @@ impl DevicesView {
             let position = ui.input(|input| input.pointer.interact_pos());
             if clicked && position.is_some_and(|position| !rect.contains(position)) {
                 play(shared, UiSound::Close);
-                self.expanded = None;
+                self.closing = true;
+                self.expanded_at = None;
             }
+        }
+        if self.closing && openness <= 0.001 {
+            self.expanded = None;
+            self.closing = false;
         }
 
         self.flush_due(ui.ctx(), shared, poller);
@@ -522,29 +562,22 @@ impl DevicesView {
         if let Some(fraction) = slider_fraction
             && fraction > 0.0
         {
-            let fill = Rect::from_min_max(
-                pos2(
-                    body_rect.left(),
-                    rect.bottom() - fraction * body_rect.height(),
-                ),
-                body_rect.right_bottom(),
-            );
-            painter.rect_filled(
-                fill,
-                CornerRadius::same(CARD_RADIUS),
+            // Clip a full-card rounded rect to the fill level: the fill spans the
+            // whole cell (including under the disclosure strip) and follows the
+            // card's own curvature on both sides instead of ending in a rounded
+            // notch at the strip boundary.
+            let card_inner = rect.shrink(1.0);
+            let fill_top = card_inner.bottom() - fraction * card_inner.height();
+            let fill_clip = Rect::from_min_max(pos2(card_inner.left(), fill_top), card_inner.max);
+            painter.with_clip_rect(fill_clip).rect_filled(
+                card_inner,
+                CornerRadius::same(CARD_RADIUS - 1),
                 Color32::from_rgba_unmultiplied(
                     37,
                     99,
                     235,
                     if toggle.is_some() && !on { 42 } else { 78 },
                 ),
-            );
-        }
-        if toggle.is_some() {
-            painter.circle_filled(
-                pos2(body_rect.right() - 8.0, body_rect.top() + 8.0),
-                3.0,
-                if on { PALETTE.ok } else { PALETTE.outline },
             );
         }
         painter.rect_stroke(
@@ -591,7 +624,7 @@ impl DevicesView {
         }
 
         let text_x = inner.left() + 40.0;
-        let text_right = body_rect.right() - if toggle.is_some() { 14.0 } else { 6.0 };
+        let text_right = inner.right();
         let max_chars = (((text_right - text_x) / 6.2).floor() as usize).max(5);
         painter.text(
             pos2(text_x, inner.top()),
@@ -610,14 +643,16 @@ impl DevicesView {
             );
         }
 
+        let bottom_chars = (((inner.width() - 16.0) / 4.8).floor() as usize).max(4);
         let mut value_text = None;
         let mut value_label = None;
+        let mut value_strong = false;
         if let Some(param) = slider {
             value_label = Some(prettify(&param.name));
             value_text = Some(format_number(slider_value.unwrap(), param.is_int));
-        } else if let Some(toggle) = toggle {
-            value_label = Some(prettify(toggle));
+        } else if toggle.is_some() {
             value_text = Some(if on { "On".into() } else { "Off".into() });
+            value_strong = on;
         } else if let Some(action) = primary_action {
             value_label = Some(action.label.clone());
         } else if let Some(readout) = group.readouts.first()
@@ -629,39 +664,31 @@ impl DevicesView {
                 .unwrap_or_else(|| "—".into());
             value_label = Some(prettify(&field.name));
             value_text = Some(value);
+            value_strong = true;
         }
+        // One shared bottom row: label on the left, value on the right. Every
+        // tile kind uses the same baseline so tiles no longer drift apart.
         if let Some(label) = value_label {
-            let label_y = if slider.is_some() || value_text.is_none() {
-                rect.bottom() - 23.0
-            } else {
-                rect.bottom() - 37.0
-            };
             painter.text(
-                pos2(inner.left(), label_y),
+                pos2(inner.left(), inner.bottom()),
                 Align2::LEFT_BOTTOM,
-                fit_text(&label, max_chars + 2),
+                fit_text(&label, bottom_chars),
                 FontId::proportional(9.0),
                 PALETTE.muted,
             );
         }
         if let Some(value) = value_text {
-            if slider.is_some() {
-                painter.text(
-                    pos2(inner.right(), rect.bottom() - 23.0),
-                    Align2::RIGHT_BOTTOM,
-                    value,
-                    FontId::proportional(10.5),
-                    PALETTE.on_surface_variant,
-                );
-            } else {
-                painter.text(
-                    pos2(inner.left(), rect.bottom() - 23.0),
-                    Align2::LEFT_BOTTOM,
-                    value,
-                    FontId::proportional(15.0),
-                    Color32::WHITE,
-                );
-            }
+            painter.text(
+                pos2(inner.right(), inner.bottom()),
+                Align2::RIGHT_BOTTOM,
+                fit_text(&value, bottom_chars.min(7)),
+                FontId::proportional(11.0),
+                if value_strong {
+                    Color32::WHITE
+                } else {
+                    PALETTE.on_surface_variant
+                },
+            );
         }
 
         if let Some(strip_rect) = strip_rect {
@@ -802,6 +829,57 @@ impl DevicesView {
             },
         );
         key
+    }
+
+    /// Renders the expanded card inside a height that follows `openness` while
+    /// the card itself is laid out at full height and clipped to the reveal, so
+    /// the flyout's auto-height grows/shrinks with the animation.
+    #[allow(clippy::too_many_arguments)]
+    fn expanded_animated(
+        &mut self,
+        ui: &mut Ui,
+        group: &DeviceGroup,
+        snap: &Snapshot,
+        shared: &Arc<Shared>,
+        poller: &Poller,
+        openness: f32,
+        collapse_request: &mut bool,
+    ) -> Rect {
+        let width = ui.available_width();
+        let full_height = self
+            .expanded_height
+            .as_ref()
+            .filter(|(path, _)| path == &group.path)
+            .map_or(EXPANDED_HEIGHT_GUESS, |(_, height)| *height);
+        let visible_height = if openness >= 0.999 {
+            full_height
+        } else {
+            (full_height * openness).max(0.0)
+        };
+        let (rect, _) = ui.allocate_exact_size(vec2(width, visible_height), Sense::hover());
+        if openness <= 0.001 {
+            return rect;
+        }
+
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(Rect::from_min_size(rect.min, vec2(width, full_height)))
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+        child.set_width(width);
+        if openness < 0.999 {
+            let mut clip = child.clip_rect();
+            clip.max.y = clip.max.y.min(rect.top() + visible_height);
+            child.set_clip_rect(clip);
+            child.set_opacity(openness);
+        }
+        let card = self.expanded_card(&mut child, group, snap, shared, poller, collapse_request);
+        // Layout runs at full height even while clipped, so this is always the
+        // card's natural height.
+        if card.height() > 0.0 {
+            self.expanded_height = Some((group.path.clone(), card.height()));
+        }
+        rect
     }
 
     fn expanded_card(

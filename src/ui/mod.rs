@@ -457,17 +457,25 @@ impl PiDaTrayApp {
                                                 );
                                             }
                                             let scroll_max = ui.available_height().max(120.0);
-                                            let scroll = egui::ScrollArea::vertical()
+                                            let mut scroll = egui::ScrollArea::vertical()
                                                 .max_height(scroll_max)
-                                                .auto_shrink([false, false])
-                                                .show(ui, |ui| {
-                                                    self.devices.show(
-                                                        ui,
-                                                        &snap,
-                                                        &self.shared,
-                                                        &self.poller,
-                                                    )
-                                                });
+                                                .auto_shrink([false, false]);
+                                            // The flyout height trails the animated
+                                            // reveal by a frame; hide the scrollbar so
+                                            // it doesn't flash mid-expansion.
+                                            if self.devices.is_animating() {
+                                                scroll = scroll.scroll_bar_visibility(
+                                                    egui::containers::scroll_area::ScrollBarVisibility::AlwaysHidden,
+                                                );
+                                            }
+                                            let scroll = scroll.show(ui, |ui| {
+                                                self.devices.show(
+                                                    ui,
+                                                    &snap,
+                                                    &self.shared,
+                                                    &self.poller,
+                                                )
+                                            });
                                             scroll_delta =
                                                 scroll.content_size.y - scroll.inner_rect.height();
                                         }
