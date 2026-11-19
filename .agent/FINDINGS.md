@@ -29,3 +29,11 @@ Initial scaffold was created offline without a Rust toolchain. During ingestion,
 - **Collapsible cards + aligned controls**: device cards have a chevron disclosure, section labels (`Controls` / `Status` / `Actions`), two-column action tiles, and fixed label/value columns so every slider track is the same length. Slider rails use a dedicated `PALETTE.track` colour instead of blending into the card.
 - **Resizable, monitor-aware flyout**: the window is resizable vertically (width locked), starts at 720 pt / caps at 900 pt or the monitor work area, remembers a user drag in `settings.json`, and offers **Reset flyout size** in Settings.
 - **Mapped-window reveal fix**: hiding with `ViewportCommand::Visible(false)` left eframe 0.37 with a blank swap chain on the next show. The window now stays mapped, is parked at `-32000,-32000`, and is DWM-cloaked while hidden (`main::set_window_cloaked`); show uncloaks and repositions it.
+
+## Ported PiGradient tray UI fixes
+- **One-tick reveal**: `RevealPhase::{RevealNow, Settling, ReadyToUncloak, Shown}` + `painted_once` + `reveal_flyout_at` (`SetWindowPos` / uncloak / foreground attach) replace the old position-then-show sequence, removing resize jumps and white flashes.
+- **Window policy**: HWND subclass now returns `0` for `WM_NCCALCSIZE`, suppresses `WM_NCACTIVATE` / `WM_NCPAINT` / `WM_ERASEBKGND`, strips `WS_CAPTION|WS_BORDER|WS_SYSMENU|WS_MIN/MAXIMIZEBOX` plus `WS_EX_APPWINDOW`, and re-applies `DWMNCRP_DISABLED` every frame. `WS_THICKFRAME` is kept so the flyout remains height-resizable.
+- **Focus truth**: `InputState::focused` is synced from `GetForegroundWindow`; focus-loss hiding only fires after the flyout genuinely held focus, and pulses at 10 Hz while shown so click-away is noticed promptly.
+- **Tray bounce guard**: `TrayAction::PointerDown` hides an open flyout and suppresses the matching mouse-up; tray events also carry the icon rect for placement.
+- **Card rendering**: 1px transparent `CARD_BLEED`, window width includes stroke + bleed, and the card border is repainted after children so header/footer fills cannot cover it.
+- **Controls**: icon buttons have hover/pressed feedback and a pointing cursor; the server URL field keeps a 1px focus stroke so focusing it cannot grow the card; constant label/value columns keep slider tracks aligned.

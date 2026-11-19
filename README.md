@@ -33,6 +33,7 @@ Desktop access to server-managed home automation devices should not require keep
 - Schema-driven controls preserving server YAML key order: boolean toggles, bounded sliders, numeric steppers, enum pills/dropdowns, string inputs, read-only state readouts, and legacy one-shot action buttons.
 - Collapsible device cards keep large catalogs compact; drag the flyout's top or bottom edge to resize it (height is remembered; expanded/collapsed state lasts for the session).
 - Taskbar-anchored dark flyout with focus-loss auto-hide, pin toggle, and optional Windows startup registration (`HKCU\...\Run`).
+- Mapped, pre-painted flyout with a one-tick reveal: no white flash or resize jump when opening, and no unpainted swap chain after hiding.
 
 ## Usage
 

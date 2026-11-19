@@ -12,7 +12,10 @@ defaults, comments, tests, docs, or git history. Use placeholders: `http://192.0
 - `bool` params dispatch real JSON booleans.
 - Only `GET` parameterized endpoints (`set` / `readouts`); never `GET` legacy no-param actions (as `GET` executes them).
 - Hidden-window lifecycle (`tray.sync`, tray action draining, close cancel, focus-loss/Esc) runs in `App::logic`; `App::ui` returns immediately when `!visible`.
-- The window stays mapped and is parked off-screen + DWM-cloaked while hidden. Never hide it with `ViewportCommand::Visible(false)`: eframe 0.37 can then present an unpainted swap chain on the next show.
+- The window stays mapped, parked at `PARKED_POS`, and DWM-cloaked while hidden. Reveal it with `reveal_flyout_at` (SetWindowPos + uncloak + foreground attach) so the pre-painted frame appears in one tick. Never hide it with `ViewportCommand::Visible(false)`: eframe 0.37 can then present an unpainted swap chain on the next show.
+- `ensure_borderless_window_policy` subclasses the HWND every frame, strips caption/sysmenu styles, keeps `WS_THICKFRAME` for vertical resizing, and re-applies `DWMNCRP_DISABLED`. Do not replace it with a one-shot DWM call.
+- Tray mouse-down hides an open flyout and suppresses the matching mouse-up so it does not bounce back open.
+- Sync `InputState::focused` from `flyout_has_foreground` so egui draws the text caret and focus rings correctly.
 - Tray icon/tooltip updates are diff-cached.
 - Pure logic lives in `config`, `api`, `catalog`, `cache`, `poller` helpers, and `tray` placement so it is unit-testable.
 
