@@ -31,7 +31,7 @@ Desktop access to server-managed home automation devices should not require keep
 - Cache-first startup: loads the last saved `/api/schema`, device states, and `/api/icon/<path>` PNGs from `%APPDATA%\PiDA-Tray\` before refreshing in the background.
 - Tray icon uses the PiDA mark: full colour while connected, grayscale when offline or unconfigured, and red after a failed action.
 - Schema-driven controls preserving server YAML key order: boolean toggles, bounded sliders, numeric steppers, enum pills/dropdowns, string inputs, read-only state readouts, and legacy one-shot action buttons.
-- Collapsible device cards keep large catalogs compact; drag the flyout's top or bottom edge to resize it (height is remembered; expanded/collapsed state lasts for the session).
+- Collapsible device cards keep large catalogs compact; every card starts collapsed with its first control (slider, stepper, enum, string, or action) still visible, and the flyout shrinks/grows to fit. Drag the top or bottom edge to resize (height is remembered).
 - Taskbar-anchored dark flyout with focus-loss auto-hide, pin toggle, and optional Windows startup registration (`HKCU\...\Run`).
 - Mapped, pre-painted flyout with a one-tick reveal: no white flash or resize jump when opening, and no unpainted swap chain after hiding.
 

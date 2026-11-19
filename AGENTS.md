@@ -15,6 +15,8 @@ defaults, comments, tests, docs, or git history. Use placeholders: `http://192.0
 - The window stays mapped, parked at `PARKED_POS`, and DWM-cloaked while hidden. Reveal it with `reveal_flyout_at` (SetWindowPos + uncloak + foreground attach) so the pre-painted frame appears in one tick. Never hide it with `ViewportCommand::Visible(false)`: eframe 0.37 can then present an unpainted swap chain on the next show.
 - `ensure_borderless_window_policy` subclasses the HWND every frame, strips caption/sysmenu styles, keeps `WS_THICKFRAME` for vertical resizing, and re-applies `DWMNCRP_DISABLED`. Do not replace it with a one-shot DWM call.
 - Tray mouse-down hides an open flyout and suppresses the matching mouse-up so it does not bounce back open.
+- Device cards are collapsed by default (`DevicesView::expanded`); collapsed cards render `first_control` (slider/stepper/enum/string, then first legacy action).
+- Use `ui::button::pill_button` for custom buttons; do not use explicit `.fill()` on `egui::Button` or hover feedback is lost.
 - Sync `InputState::focused` from `flyout_has_foreground` so egui draws the text caret and focus rings correctly.
 - Tray icon/tooltip updates are diff-cached.
 - Pure logic lives in `config`, `api`, `catalog`, `cache`, `poller` helpers, and `tray` placement so it is unit-testable.
