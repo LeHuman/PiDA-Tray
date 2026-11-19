@@ -217,6 +217,7 @@ impl SettingsView {
 
                 // 3. Cache + window size controls
                 ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
                     if pill_button(
                         ui,
                         RichText::new("Reset flyout size").size(11.5),
