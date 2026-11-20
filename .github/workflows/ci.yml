@@ -69,7 +69,7 @@ jobs:
         run: |
           mkdir -p target/release-dist
           cp target/release/pida-tray.exe target/release-dist/pida-tray-windows-x86_64.exe
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: pida-tray-windows-x86_64
           path: target/release-dist/pida-tray-windows-x86_64.exe
