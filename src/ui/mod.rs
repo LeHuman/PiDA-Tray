@@ -71,6 +71,10 @@ pub struct PiDaTrayApp {
     /// Tray-icon centre in physical pixels, used to (re)place the flyout.
     anchor: Option<(f32, f32)>,
     last_viewport_height: f32,
+    /// Last client height requested from the OS. Held for the duration of an
+    /// animation so the window is resized once per transition rather than
+    /// every frame (per-frame resizes make Windows composite stale frames).
+    last_window_height: f32,
     /// Set when the user drags the flyout to a custom height.
     manual_height: Option<f32>,
     /// Content-fit cap for this monitor's work area.
@@ -93,8 +97,11 @@ pub struct PiDaTrayApp {
     settings: settings::SettingsView,
     /// Eased position between the devices grid (0.0) and settings (1.0).
     view_mix: f32,
-    /// Window height when the current view transition started.
+    /// Card height when the current view transition started.
     view_from_height: Option<f32>,
+    /// Sign of the last transition step, to restart the ease from the rendered
+    /// card height when the direction reverses.
+    view_dir: f32,
 }
 
 impl PiDaTrayApp {
@@ -145,6 +152,7 @@ impl PiDaTrayApp {
             view: View::Devices,
             anchor: None,
             last_viewport_height,
+            last_window_height: last_viewport_height,
             manual_height,
             max_height: FLYOUT_MAX_HEIGHT,
             size_settle: 0,
@@ -160,6 +168,7 @@ impl PiDaTrayApp {
             settings: Default::default(),
             view_mix: 0.0,
             view_from_height: None,
+            view_dir: 0.0,
         }
     }
 
@@ -217,7 +226,9 @@ impl PiDaTrayApp {
             return;
         }
 
-        let previous_height = self.last_viewport_height;
+        // The parked window's size, not the card's animated height: they only
+        // differ if the flyout was hidden mid-transition.
+        let previous_height = self.last_window_height;
         let desired = self.manual_height.unwrap_or(previous_height);
         let target = quantize_height(ctx, desired.clamp(FLYOUT_MIN_HEIGHT, self.max_height));
         let pos = self.compute_placement(ctx, target);
@@ -229,6 +240,7 @@ impl PiDaTrayApp {
         self.seen_focused_while_shown = false;
         self.shared.set_visible(true);
         self.last_viewport_height = target;
+        self.last_window_height = target;
         self.size_settle = 3;
 
         // Fast path: the parked swap chain already holds a frame at exactly
@@ -266,6 +278,8 @@ impl PiDaTrayApp {
         self.reveal_phase = RevealPhase::Hidden;
         self.view = View::Devices;
         self.view_mix = 0.0;
+        self.view_from_height = None;
+        self.view_dir = 0.0;
         self.settings.reset();
         self.shown_at = None;
         self.seen_focused_while_shown = false;
@@ -392,8 +406,16 @@ impl PiDaTrayApp {
         };
         if (self.view_mix - target).abs() <= f32::EPSILON {
             self.view_from_height = None;
+            self.view_dir = 0.0;
             return;
         }
+        let dir = (target - self.view_mix).signum();
+        if self.view_dir != 0.0 && dir != self.view_dir {
+            // Reversed mid-flight: ease from the card height actually on
+            // screen, not from where the previous transition started.
+            self.view_from_height = Some(self.last_viewport_height);
+        }
+        self.view_dir = dir;
         if self.view_from_height.is_none() {
             self.view_from_height = Some(self.last_viewport_height);
         }
@@ -510,11 +532,20 @@ impl PiDaTrayApp {
             .show(ui, |ui| {
                 ui.set_width(FLYOUT_OUTER_WIDTH);
 
-                // Fixed shell derived from the actual client viewport. It does
-                // not follow the content, so the card's rounded bottom edge is
-                // present on every frame, including while the flyout animates.
+                // Card shell. The *card* height is animated and anchored to the
+                // window bottom, so its rounded bottom edge never moves; the
+                // window is only resized once per transition. Resizing the
+                // window every frame makes Windows composite stale frames and
+                // tears the bottom corners.
                 let viewport = ui.max_rect();
-                let outer = viewport.shrink(CARD_BLEED);
+                let card_h = self
+                    .last_viewport_height
+                    .clamp(FLYOUT_MIN_HEIGHT, viewport.height().max(FLYOUT_MIN_HEIGHT));
+                let card_rect = Rect::from_min_max(
+                    egui::pos2(viewport.left(), viewport.bottom() - card_h),
+                    viewport.max,
+                );
+                let outer = card_rect.shrink(CARD_BLEED);
                 let inner = outer.shrink(CARD_STROKE_WIDTH);
                 ui.painter()
                     .rect_filled(outer, CornerRadius::same(FLYOUT_RADIUS), PALETTE.surface);
@@ -525,10 +556,17 @@ impl PiDaTrayApp {
                 content.spacing_mut().item_spacing = vec2(0.0, 0.0);
 
                 let head = header::show(&mut content, &snap, self.view == View::Settings);
-                let header_h = content.cursor().top() - inner.top();
+                // The header's own rect, not the cursor delta: during a card
+                // animation the card top is fractional and the delta picks up
+                // subpixel noise, which would make the settled target drift.
+                let header_h = head.height;
                 let mut close_settings = false;
                 let mut reset_size = false;
+                // Body height the content needs *now* (drives the card) and the
+                // height it will need once settled (drives the one-shot window
+                // resize). They differ while content animates its own height.
                 let body_required;
+                let body_target;
 
                 // The settings sheet slides up over the device grid; closing
                 // slides it back down. The sheet is laid out at an offset rect
@@ -550,8 +588,13 @@ impl PiDaTrayApp {
                         Rect::from_min_size(scene.min + vec2(0.0, slide), scene.size());
                     let mut sheet = content.new_child(egui::UiBuilder::new().max_rect(sheet_rect));
                     sheet.set_clip_rect(scene);
+                    // Backdrop: sheet colour from the reveal line down to the
+                    // card's inner bottom, rounded there. Painting the whole
+                    // translated rect would leave its square bottom corners
+                    // covering the card's arcs while the sheet slides.
+                    let backdrop = Rect::from_min_max(sheet_rect.min, scene.max);
                     sheet.painter().rect_filled(
-                        sheet_rect,
+                        backdrop,
                         CornerRadius {
                             nw: 0,
                             ne: 0,
@@ -564,8 +607,17 @@ impl PiDaTrayApp {
                     close_settings = outcome.close;
                     reset_size = outcome.reset_size;
                     body_required = sheet.min_rect().height().max(scene.height());
+                    // The form pads its footer to fill the card, so its laid-out
+                    // height tracks the current window. Use the measured form
+                    // height as the settled target instead.
+                    body_target = if outcome.content_height > 0.0 {
+                        outcome.content_height
+                    } else {
+                        body_required
+                    };
                 } else {
                     body_required = self.devices_body(&mut content, &snap);
+                    body_target = body_required + self.devices.expansion_extra();
                     if fade > 0.001 {
                         let slide = (1.0 - fade) * scene.height();
                         let sheet_rect =
@@ -573,8 +625,9 @@ impl PiDaTrayApp {
                         let mut sheet =
                             content.new_child(egui::UiBuilder::new().max_rect(sheet_rect));
                         sheet.set_clip_rect(scene);
+                        let backdrop = Rect::from_min_max(sheet_rect.min, scene.max);
                         sheet.painter().rect_filled(
-                            sheet_rect,
+                            backdrop,
                             CornerRadius {
                                 nw: 0,
                                 ne: 0,
@@ -591,12 +644,13 @@ impl PiDaTrayApp {
                     close_settings,
                     reset_size,
                     body_required,
+                    body_target,
                     header_h,
                     outer,
                 )
             });
 
-        let (head, close_settings, reset_size, body_required, header_h, outer) =
+        let (head, close_settings, reset_size, body_required, body_target, header_h, outer) =
             card_response.inner;
 
         // One border, painted after the content so it stays crisp over the
@@ -659,11 +713,12 @@ impl PiDaTrayApp {
             self.size_settle -= 1;
         } else if let Some(actual) =
             ctx.input(|i| i.viewport().inner_rect.map(|rect| rect.height()))
-            && (actual - self.last_viewport_height).abs() > 2.0
+            && (actual - self.last_window_height).abs() > 2.0
         {
             let height = actual.clamp(FLYOUT_MIN_HEIGHT, self.max_height);
             self.manual_height = Some(height);
             self.last_viewport_height = height;
+            self.last_window_height = height;
             self.dirty_height = true;
             self.place(&ctx, height);
         }
@@ -672,17 +727,25 @@ impl PiDaTrayApp {
         // the content actually needs. The shell itself never grows with content,
         // so measure the body independently of the current window height.
         let chrome = 2.0 * (CARD_BLEED + CARD_STROKE_WIDTH);
-        let natural_h = (chrome + header_h + body_required)
-            .ceil()
-            .max(FLYOUT_MIN_HEIGHT);
+        let fit = |body: f32| (chrome + header_h + body).ceil().max(FLYOUT_MIN_HEIGHT);
+        let natural_h = fit(body_required);
         let measured_h = self
             .manual_height
             .unwrap_or(natural_h)
             .clamp(FLYOUT_MIN_HEIGHT, self.max_height);
+        // Settled height. Independent of the current window size, so the
+        // window can be pre-sized once instead of tracking the animation.
+        let target_h = self
+            .manual_height
+            .unwrap_or(fit(body_target))
+            .clamp(FLYOUT_MIN_HEIGHT, self.max_height);
 
-        if (measured_h - self.last_viewport_height).abs() > 0.5 {
+        // Ease the card toward the height its content needs right now. Only
+        // the view transition animates; content changes (card expand/collapse)
+        // supply their own animated height and snap here.
+        let card_next = if (measured_h - self.last_viewport_height).abs() > 0.5 {
             // Views have different natural heights (settings is taller than a
-            // few rows of tiles). Ease the window between them so switching
+            // few rows of tiles). Ease the card between them so switching
             // doesn't snap; the incoming content is revealed as it grows.
             let next = match self.view_from_height {
                 Some(from) if self.view_mix > 0.0 && self.view_mix < 1.0 => {
@@ -698,18 +761,43 @@ impl PiDaTrayApp {
             };
             // Round up to a whole physical pixel: a fractional inner height
             // truncates at the OS/DPI boundary and clips the card's bottom edge.
-            let next = quantize_height(&ctx, next);
-            self.last_viewport_height = next;
-            ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(FLYOUT_OUTER_WIDTH, next)));
+            quantize_height(&ctx, next)
+        } else {
+            quantize_height(&ctx, self.last_viewport_height)
+        };
+        self.last_viewport_height = card_next;
+
+        // Keep the window at least as tall as the card. A growing target gets
+        // room up front (the empty strip appears above the card and is
+        // invisible); a shrinking card keeps the old window until it has
+        // arrived, then the window is resized once. Never resize per frame:
+        // resizing while painting makes Windows composite stale frames.
+        let arrived = (card_next - target_h).abs() <= 0.5;
+        let want_window = if target_h > self.last_window_height + 0.5
+            || card_next > self.last_window_height + 0.5
+        {
+            target_h.max(card_next)
+        } else if arrived && target_h < self.last_window_height - 0.5 {
+            target_h
+        } else {
+            self.last_window_height
+        };
+
+        if (want_window - self.last_window_height).abs() > 0.5 {
+            self.last_window_height = want_window;
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(
+                FLYOUT_OUTER_WIDTH,
+                want_window,
+            )));
             self.size_settle = 3;
             if self.reveal_phase == RevealPhase::Shown {
-                self.place(&ctx, next);
+                self.place(&ctx, want_window);
             } else {
                 self.reveal_phase = RevealPhase::Settling;
             }
             ctx.request_repaint();
         } else if self.reveal_phase == RevealPhase::Settling {
-            self.place(&ctx, self.last_viewport_height);
+            self.place(&ctx, want_window);
             self.parked = false;
             self.reveal_phase = RevealPhase::ReadyToUncloak;
             ctx.request_repaint();
@@ -743,7 +831,7 @@ impl eframe::App for PiDaTrayApp {
                     pos.x * ppp,
                     pos.y * ppp,
                     FLYOUT_OUTER_WIDTH * ppp,
-                    self.last_viewport_height * ppp,
+                    self.last_window_height * ppp,
                 );
             }
             self.parked = false;

@@ -69,6 +69,8 @@ pub struct DevicesView {
     /// Last animated openness of the expanded card, used to suppress the
     /// scrollbar flash while the flyout height catches up.
     last_openness: f32,
+    /// Body height currently allocated to the animated expanded card.
+    expand_visible: f32,
 }
 
 fn decode_png(bytes: &[u8]) -> Result<ColorImage, ApiError> {
@@ -304,6 +306,7 @@ impl DevicesView {
     pub fn collapse_expanded(&mut self) {
         self.expanded = None;
         self.closing = false;
+        self.expand_visible = 0.0;
         self.press.clear();
     }
 
@@ -311,6 +314,26 @@ impl DevicesView {
     /// catching up, so callers can hide the transient scrollbar.
     pub fn is_animating(&self) -> bool {
         self.expanded.is_some() && self.last_openness < 0.999
+    }
+
+    /// Extra body height the expanded card still needs once it settles.
+    ///
+    /// The body reports the card's *animated* reveal height, which would make
+    /// the flyout window resize on every frame of the reveal. The window is
+    /// instead pre-sized to the settled height once; the card then grows into
+    /// it.
+    pub fn expansion_extra(&self) -> f32 {
+        let visible = self.expand_visible.max(0.0);
+        if self.expanded.is_some() && !self.closing {
+            let full = self
+                .expanded_height
+                .as_ref()
+                .filter(|(path, _)| self.expanded.as_deref() == Some(path.as_str()))
+                .map_or(EXPANDED_HEIGHT_GUESS, |(_, height)| *height);
+            (full - visible).max(0.0)
+        } else {
+            -visible
+        }
     }
 
     pub fn flush_all(&mut self, shared: &Shared, poller: &Poller) {
@@ -874,10 +897,10 @@ impl DevicesView {
             (full_height * openness).max(0.0)
         };
         let (rect, _) = ui.allocate_exact_size(vec2(width, visible_height), Sense::hover());
-        if openness <= 0.001 {
-            return rect;
-        }
+        self.expand_visible = visible_height;
 
+        // Laid out even at zero openness: the measured height is what lets the
+        // flyout pre-size its window once instead of following every frame.
         let mut child = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(Rect::from_min_size(rect.min, vec2(width, full_height)))
@@ -886,7 +909,7 @@ impl DevicesView {
         child.set_width(width);
         if openness < 0.999 {
             let mut clip = child.clip_rect();
-            clip.max.y = clip.max.y.min(rect.top() + visible_height);
+            clip.max.y = clip.max.y.min(rect.top() + visible_height).max(clip.min.y);
             child.set_clip_rect(clip);
             child.set_opacity(openness);
         }

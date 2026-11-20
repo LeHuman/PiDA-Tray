@@ -19,6 +19,8 @@ pub struct HeaderOutput {
     pub settings: bool,
     pub hide: bool,
     pub back: bool,
+    /// Height the header occupied, independent of where it was laid out.
+    pub height: f32,
 }
 
 pub fn status_color(snap: &Snapshot) -> Color32 {
@@ -195,6 +197,7 @@ pub fn show(ui: &mut Ui, snap: &Snapshot, in_settings: bool) -> HeaderOutput {
         });
 
     let rect = resp.response.rect;
+    out.height = rect.height();
     ui.painter().line_segment(
         [rect.left_bottom(), rect.right_bottom()],
         Stroke::new(1.0, border_subtle()),

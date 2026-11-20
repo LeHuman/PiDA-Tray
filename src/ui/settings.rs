@@ -3,18 +3,21 @@
 use std::sync::Arc;
 
 use eframe::egui::{
-    self, Align, Color32, CornerRadius, FontId, Frame, Layout, Margin, Pos2, RichText, Stroke, Ui,
-    Vec2,
+    self, Align, Color32, CornerRadius, FontId, Frame, Layout, Margin, Pos2, Rect, RichText,
+    Stroke, Ui, Vec2,
 };
 
 use crate::{
     config::{normalize_server_url, set_autostart},
-    constants::{CARD_STROKE_WIDTH, FLYOUT_RADIUS, FLYOUT_WIDTH, IDLE_POLL_CHOICES, PALETTE},
+    constants::{FLYOUT_WIDTH, IDLE_POLL_CHOICES, PALETTE},
     poller::{Command, Poller, Shared},
     theme::border_subtle,
 };
 
-use super::button::{ButtonKind, pill_button};
+use super::{
+    SHEET_RADIUS,
+    button::{ButtonKind, pill_button},
+};
 
 #[derive(Default)]
 pub struct SettingsView {
@@ -32,6 +35,10 @@ pub struct SettingsOutcome {
     pub close: bool,
     /// Restore content-fit flyout height and forget the dragged height.
     pub reset_size: bool,
+    /// Height the form needs without the padding that pushes the footer to the
+    /// bottom of the card. Used as the settled flyout height, so it does not
+    /// depend on the current window size.
+    pub content_height: f32,
 }
 
 fn poll_label(secs: u64) -> String {
@@ -263,12 +270,14 @@ impl SettingsView {
         if submit && self.save(shared, poller) {
             self.reset();
             out.close = true;
+            out.content_height = ui.min_rect().height();
             return out;
         }
 
         // Push the action bar to the bottom of the card so it does not float
         // directly under the form when the flyout is taller than the content.
         let remaining = (ui.available_height() - footer_h).max(0.0);
+        let stretch = remaining;
         if remaining > 0.0 {
             ui.add_space(remaining);
         }
@@ -283,14 +292,31 @@ impl SettingsView {
             Stroke::new(1.0, border_subtle()),
         );
 
+        // Footer background. Anchored to the card's inner bottom instead of
+        // the sheet rect: while the settings sheet slides, its bottom is below
+        // the card and the scene clip would cut this fill's rounded corners
+        // square, painting over the card's bottom arcs. Ending the fill at the
+        // clip bottom keeps the radius concentric with the card shell.
+        let footer_bg = Rect::from_min_max(
+            sep_start,
+            Pos2::new(sep_start.x + FLYOUT_WIDTH, ui.clip_rect().max.y),
+        );
+        if footer_bg.height() > 0.0 {
+            ui.painter().rect_filled(
+                footer_bg,
+                CornerRadius {
+                    nw: 0,
+                    ne: 0,
+                    sw: SHEET_RADIUS,
+                    se: SHEET_RADIUS,
+                },
+                PALETTE.surface_header,
+            );
+        }
+
+        // Transparent frame: only lays out the buttons now that the fill is
+        // painted above.
         Frame::new()
-            .fill(PALETTE.surface_header)
-            .corner_radius(CornerRadius {
-                nw: 0,
-                ne: 0,
-                sw: FLYOUT_RADIUS - CARD_STROKE_WIDTH as u8,
-                se: FLYOUT_RADIUS - CARD_STROKE_WIDTH as u8,
-            })
             .inner_margin(Margin::symmetric(12, 10))
             .show(ui, |ui| {
                 ui.set_width(FLYOUT_WIDTH - 24.0);
@@ -326,6 +352,7 @@ impl SettingsView {
                 });
             });
 
+        out.content_height = (ui.min_rect().height() - stretch).max(0.0);
         out
     }
 }
