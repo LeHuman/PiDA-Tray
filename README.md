@@ -1,3 +1,5 @@
+# PiDA Tray
+
 <!-- PROJECT: PiDA -->
 <!-- TITLE: PiDA Tray -->
 <!-- KEYWORDS: Windows, System Tray, Home Automation, Rust, REST API -->
@@ -7,17 +9,19 @@
 <!-- LOGO -->
 ![PiDA Tray](assets/icon.png)
 
-[About](#about) | [Key Features](#key-features) | [Usage](#usage) | [Security](#security) | [Related](#related) | [License](#license)
+[About](#about) | [Key Features](#key-features) | [Installation](#installation) | [Usage](#usage) | [Security](#security) | [Related](#related) | [License](#license)
 
 ## Status
 
 <!-- STATUS -->
-**Prototype**
+**Beta**
 
 ## About
 <!-- DESCRIPTION START -->
 PiDA Tray is a lightweight Windows system tray companion for controlling a PiDA server over HTTP. It renders a taskbar-anchored flyout built dynamically from the server schema with cache-first state persistence and near-zero idle resource usage.
 <!-- DESCRIPTION END -->
+
+PiDA Tray is the Windows client of the [PiDA](https://github.com/LeHuman/PiDA) project. PiDA is the parent repository; it hosts the server this tray app controls, and the same project also provides an Android companion app.
 
 ### Why
 <!-- WHY START -->
@@ -42,26 +46,32 @@ Desktop access to server-managed home automation devices should not require keep
 - Taskbar-anchored dark flyout with focus-loss auto-hide, pin toggle, and optional Windows startup registration (`HKCU\...\Run`).
 - Mapped, pre-painted flyout with a one-tick reveal: no white flash or resize jump when opening, and no unpainted swap chain after hiding.
 
-## Usage
-
-### Requirements
+## Requirements
 
 - Windows 10/11 (x86_64).
-- Rust 1.95+ (edition 2024) to build from source.
 - A reachable [PiDA](https://github.com/LeHuman/PiDA) server.
+- Rust 1.95+ (edition 2024), the Visual Studio Build Tools C++ workload, and the Windows SDK, only when building from source.
 
-### Building
+## Installation
 
-Run the unit tests and build the release binary:
+```powershell
+cargo install pida-tray
+```
+
+This builds the crate from source and installs `pida-tray.exe` into `%USERPROFILE%\.cargo\bin`, so the Windows build requirements above still apply.
+
+Alternatively, download `pida-tray-windows-x86_64.exe` from the [latest release](https://github.com/LeHuman/PiDA-Tray/releases/latest). Each release also publishes a matching `.sha256` checksum.
+
+### Building from source
 
 ```sh
 cargo test --all-features
 cargo build --release
 ```
 
-The compiled executable is written to `target/release/pida-tray.exe` (or download `pida-tray-windows-x86_64.exe` from GitHub Releases).
+The compiled executable is written to `target/release/pida-tray.exe`.
 
-### Running & Configuration
+## Usage
 
 1. Launch `pida-tray.exe`. It starts minimized to the Windows notification area.
 2. Left-click the tray icon to toggle the flyout, or right-click for the context menu (`Open / Hide Flyout`, `Refresh`, `Settings...`, `Quit PiDA Tray`).
@@ -86,7 +96,7 @@ Keep the PiDA server on a trusted private network or behind authentication. Do n
 
 ## Related
 
-- [PiDA](https://github.com/LeHuman/PiDA) — the server this tray app controls.
+- [PiDA](https://github.com/LeHuman/PiDA) — the parent project and the server this tray app controls.
 - [PiDA App](https://github.com/LeHuman/PiDA-App) — the Android companion app.
 - [egui / eframe](https://github.com/emilk/egui) — immediate-mode Rust GUI framework.
 - [tray-icon](https://github.com/tauri-apps/tray-icon) — cross-platform system tray library.

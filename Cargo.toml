@@ -1,12 +1,26 @@
 [package]
 name = "pida-tray"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
 description = "Lightweight Windows system tray controller for a PiDA server"
 license = "MIT"
 repository = "https://github.com/LeHuman/PiDA-Tray"
-publish = false
+readme = "README.md"
+keywords = ["system-tray", "home-automation", "windows", "rest-api", "egui"]
+categories = ["gui", "hardware-support"]
+exclude = [
+    ".agent/",
+    ".github/",
+    ".vscode/",
+    "AGENTS.md",
+    "TODO.md",
+]
+
+# The flyout is Windows-only; the default Linux docs build has no eframe backend.
+[package.metadata.docs.rs]
+default-target = "x86_64-pc-windows-msvc"
+targets = []
 
 [dependencies]
 eframe = { version = "0.37", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow"] }
