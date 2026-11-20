@@ -637,6 +637,20 @@ impl PiDaTrayApp {
         // final-height card has actually been painted.
         let card_painted = self.last_viewport_height;
 
+        // Fraction of the settings page that is settled (1.0 = fully in place,
+        // 0.0 = fully slid out). The card height and the sheet's slide both
+        // follow this one value, so the page never gets squeezed by a card that
+        // shrinks before the sheet has moved.
+        let settle_p = if self.view == View::Settings {
+            // Rise quickly, settle gently.
+            egui::emath::easing::cubic_out(self.view_mix)
+        } else {
+            // Slide away slowly at both ends, so neither the first nor the last
+            // frame of the close lands a large height step.
+            let m = self.view_mix;
+            m * m * (3.0 - 2.0 * m)
+        };
+
         let card_response = egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
@@ -683,8 +697,26 @@ impl PiDaTrayApp {
                 // also move the clip, letting a square backdrop paint outside
                 // the card's rounded bottom.
                 let settings_target = self.view == View::Settings;
-                let fade = egui::emath::easing::cubic_out(self.view_mix);
+                let fade = settle_p;
                 let scene = content.available_rect_before_wrap();
+
+                // The settings sheet slides as a page of constant size: laying
+                // it out at the animated card height would re-flow the form on
+                // every frame, squeezing it into the tile height as the card
+                // shrinks. Its height is the settled settings body height, and
+                // the slide is measured against that, so the page is fully out
+                // of the card when `fade` reaches zero.
+                let sheet_h = if self.settings_card_h > 0.0 {
+                    (self.settings_card_h - 2.0 * (CARD_BLEED + CARD_STROKE_WIDTH) - header_h)
+                        .max(FLYOUT_MIN_HEIGHT)
+                } else {
+                    scene.height()
+                };
+                let slide = (1.0 - fade) * sheet_h;
+                let sheet_rect = Rect::from_min_size(
+                    egui::pos2(scene.left(), scene.max.y - sheet_h + slide),
+                    vec2(scene.width(), sheet_h),
+                );
 
                 if settings_target {
                     if fade < 0.999 {
@@ -692,9 +724,6 @@ impl PiDaTrayApp {
                         base.set_clip_rect(scene);
                         self.devices_body(&mut base, &snap);
                     }
-                    let slide = (1.0 - fade) * scene.height();
-                    let sheet_rect =
-                        Rect::from_min_size(scene.min + vec2(0.0, slide), scene.size());
                     let mut sheet = content.new_child(egui::UiBuilder::new().max_rect(sheet_rect));
                     sheet.set_clip_rect(scene);
                     // Backdrop: sheet colour from the reveal line down to the
@@ -702,39 +731,7 @@ impl PiDaTrayApp {
                     // translated rect would leave its square bottom corners
                     // covering the card's arcs while the sheet slides.
                     let backdrop = Rect::from_min_max(sheet_rect.min, scene.max);
-                    sheet.painter().rect_filled(
-                        backdrop,
-                        CornerRadius {
-                            nw: 0,
-                            ne: 0,
-                            sw: SHEET_RADIUS,
-                            se: SHEET_RADIUS,
-                        },
-                        PALETTE.surface,
-                    );
-                    let outcome = self.settings_body(&mut sheet);
-                    close_settings = outcome.close;
-                    reset_size = outcome.reset_size;
-                    body_required = sheet.min_rect().height().max(scene.height());
-                    // The form pads its footer to fill the card, so its laid-out
-                    // height tracks the current window. Use the measured form
-                    // height as the settled target instead.
-                    body_target = if outcome.content_height > 0.0 {
-                        outcome.content_height
-                    } else {
-                        body_required
-                    };
-                } else {
-                    body_required = self.devices_body(&mut content, &snap);
-                    body_target = body_required + self.devices.expansion_extra();
-                    if fade > 0.001 {
-                        let slide = (1.0 - fade) * scene.height();
-                        let sheet_rect =
-                            Rect::from_min_size(scene.min + vec2(0.0, slide), scene.size());
-                        let mut sheet =
-                            content.new_child(egui::UiBuilder::new().max_rect(sheet_rect));
-                        sheet.set_clip_rect(scene);
-                        let backdrop = Rect::from_min_max(sheet_rect.min, scene.max);
+                    if backdrop.height() > 0.0 {
                         sheet.painter().rect_filled(
                             backdrop,
                             CornerRadius {
@@ -745,6 +742,39 @@ impl PiDaTrayApp {
                             },
                             PALETTE.surface,
                         );
+                    }
+                    let outcome = self.settings_body(&mut sheet);
+                    close_settings = outcome.close;
+                    reset_size = outcome.reset_size;
+                    body_required = sheet.min_rect().height().max(scene.height());
+                    // The form pads its footer to fill the card, so its laid-out
+                    // height tracks the sheet. Use the measured form height as
+                    // the settled target instead.
+                    body_target = if outcome.content_height > 0.0 {
+                        outcome.content_height
+                    } else {
+                        body_required
+                    };
+                } else {
+                    body_required = self.devices_body(&mut content, &snap);
+                    body_target = body_required + self.devices.expansion_extra();
+                    if fade > 0.001 {
+                        let mut sheet =
+                            content.new_child(egui::UiBuilder::new().max_rect(sheet_rect));
+                        sheet.set_clip_rect(scene);
+                        let backdrop = Rect::from_min_max(sheet_rect.min, scene.max);
+                        if backdrop.height() > 0.0 {
+                            sheet.painter().rect_filled(
+                                backdrop,
+                                CornerRadius {
+                                    nw: 0,
+                                    ne: 0,
+                                    sw: SHEET_RADIUS,
+                                    se: SHEET_RADIUS,
+                                },
+                                PALETTE.surface,
+                            );
+                        }
                         self.settings_body(&mut sheet);
                     }
                 }
@@ -942,12 +972,16 @@ impl PiDaTrayApp {
             // doesn't snap; the incoming content is revealed as it grows.
             let next = match self.view_from_height {
                 Some(from) if self.view_mix > 0.0 && self.view_mix < 1.0 => {
-                    let progress = if self.view == View::Settings {
-                        self.view_mix
+                    // Track the sheet's own progress, not the raw mix: the
+                    // sheet's slide is `(1 - fade)`, so the card must shrink on
+                    // that same curve. `cubic_out(1 - mix)` is fast at the
+                    // start and squeezed the settings form into the tile height
+                    // before the sheet had moved.
+                    let eased = if self.view == View::Settings {
+                        settle_p
                     } else {
-                        1.0 - self.view_mix
+                        1.0 - settle_p
                     };
-                    let eased = egui::emath::easing::cubic_out(progress);
                     from + (measured_h - from) * eased
                 }
                 _ => measured_h,
