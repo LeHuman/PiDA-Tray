@@ -31,6 +31,13 @@ use button::{ButtonKind, pill_button};
 
 const VIEW_ANIMATION: f32 = 0.18;
 
+/// Round a logical height up to a whole physical pixel. Fractional inner sizes
+/// truncate when DPI scaling converts them, which clips the card's bottom edge.
+fn quantize_height(ctx: &egui::Context, height: f32) -> f32 {
+    let ppp = ctx.pixels_per_point().max(0.5);
+    (height * ppp).ceil() / ppp
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
     Devices,
@@ -210,8 +217,8 @@ impl PiDaTrayApp {
 
         let previous_height = self.last_viewport_height;
         let desired = self.manual_height.unwrap_or(previous_height);
-        let pos = self.compute_placement(ctx, desired);
-        let target = desired.clamp(FLYOUT_MIN_HEIGHT, self.max_height);
+        let target = quantize_height(ctx, desired.clamp(FLYOUT_MIN_HEIGHT, self.max_height));
+        let pos = self.compute_placement(ctx, target);
 
         self.visible = true;
         self.view = View::Devices;
@@ -456,10 +463,17 @@ impl PiDaTrayApp {
                     let scroll_max = ui.available_height().max(120.0);
                     let mut scroll = egui::ScrollArea::vertical()
                         .max_height(scroll_max)
+                        // egui's default 64 pt minimum makes the card taller
+                        // than a short flyout (empty/one-row states), which
+                        // clipped the card's bottom edge.
+                        .min_scrolled_height(0.0)
                         .auto_shrink([false, false]);
-                    // The flyout height trails the animated reveal by a frame;
-                    // hide the scrollbar so it doesn't flash mid-expansion.
-                    if self.devices.is_animating() {
+                    // The flyout height trails the animated reveal by a frame,
+                    // and the view crossfade changes the tile width while the
+                    // window is still shrinking. Hide the scrollbar during
+                    // both so it never flashes or changes the grid geometry.
+                    let view_transitioning = self.view_mix > 0.001 && self.view_mix < 0.999;
+                    if self.devices.is_animating() || view_transitioning {
                         scroll = scroll.scroll_bar_visibility(
                             egui::containers::scroll_area::ScrollBarVisibility::AlwaysHidden,
                         );
@@ -521,7 +535,12 @@ impl PiDaTrayApp {
                             let scene = ui.available_rect_before_wrap();
                             let slide = (1.0 - fade) * scene.height();
                             ui.scope(|ui| {
-                                ui.set_clip_rect(scene);
+                                // Only clip while sliding; a fully open sheet
+                                // may paint into the card's 1px stroke area so
+                                // the footer reaches the border without a seam.
+                                if fade < 0.999 {
+                                    ui.set_clip_rect(scene);
+                                }
                                 ui.with_visual_transform(
                                     egui::emath::TSTransform::from_translation(vec2(0.0, slide)),
                                     |ui| {
@@ -662,6 +681,9 @@ impl PiDaTrayApp {
                 }
                 _ => measured_h,
             };
+            // Round up to a whole physical pixel: a fractional inner height
+            // truncates at the OS/DPI boundary and clips the card's bottom edge.
+            let next = quantize_height(&ctx, next);
             self.last_viewport_height = next;
             ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(FLYOUT_OUTER_WIDTH, next)));
             self.size_settle = 3;

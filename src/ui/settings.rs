@@ -101,7 +101,7 @@ impl SettingsView {
         // All clickable settings controls get a pointing cursor.
         ui.style_mut().visuals.interact_cursor = Some(egui::CursorIcon::PointingHand);
 
-        let footer_h = 52.0;
+        let footer_h = 50.0;
         Frame::new()
             .inner_margin(Margin::symmetric(12, 12))
             .show(ui, |ui| {
