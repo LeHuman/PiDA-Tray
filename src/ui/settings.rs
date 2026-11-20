@@ -9,7 +9,7 @@ use eframe::egui::{
 
 use crate::{
     config::{normalize_server_url, set_autostart},
-    constants::{FLYOUT_WIDTH, IDLE_POLL_CHOICES, PALETTE},
+    constants::{APP_VERSION, FLYOUT_WIDTH, IDLE_POLL_CHOICES, PALETTE, REPO_URL},
     poller::{Command, Poller, Shared},
     theme::border_subtle,
 };
@@ -307,42 +307,61 @@ impl SettingsView {
             );
         }
 
-        // Transparent frame: only lays out the buttons now that the fill is
+        // Transparent frame: only lays out the footer now that the fill is
         // painted above.
         Frame::new()
-            .inner_margin(Margin::symmetric(12, 10))
+            .inner_margin(Margin::symmetric(12, 12))
             .show(ui, |ui| {
-                ui.set_width(FLYOUT_WIDTH - 24.0);
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.spacing_mut().item_spacing = Vec2::new(8.0, 0.0);
+                ui.allocate_ui_with_layout(
+                    Vec2::new(FLYOUT_WIDTH - 24.0, 32.0),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        // Version link on the bottom-left, matching the sibling
+                        // tray app: the version itself opens the repository.
+                        ui.scope(|ui| {
+                            ui.style_mut().visuals.hyperlink_color = PALETTE.focus;
+                            ui.hyperlink_to(
+                                RichText::new(format!("v{APP_VERSION}"))
+                                    .size(11.5)
+                                    .color(PALETTE.focus),
+                                REPO_URL,
+                            )
+                            .on_hover_text(REPO_URL)
+                            .on_hover_cursor(egui::CursorIcon::PointingHand);
+                        });
 
-                    if pill_button(
-                        ui,
-                        RichText::new("Save").size(12.0).strong(),
-                        Vec2::new(66.0, 30.0),
-                        6,
-                        ButtonKind::Primary,
-                    )
-                    .clicked()
-                        && self.save(shared, poller)
-                    {
-                        self.reset();
-                        out.close = true;
-                    }
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.spacing_mut().item_spacing = Vec2::new(8.0, 0.0);
 
-                    if pill_button(
-                        ui,
-                        RichText::new("Cancel").size(12.0).strong(),
-                        Vec2::new(62.0, 30.0),
-                        6,
-                        ButtonKind::Ghost,
-                    )
-                    .clicked()
-                    {
-                        self.reset();
-                        out.close = true;
-                    }
-                });
+                            if pill_button(
+                                ui,
+                                RichText::new("Save").size(12.0).strong(),
+                                Vec2::new(66.0, 32.0),
+                                6,
+                                ButtonKind::Primary,
+                            )
+                            .clicked()
+                                && self.save(shared, poller)
+                            {
+                                self.reset();
+                                out.close = true;
+                            }
+
+                            if pill_button(
+                                ui,
+                                RichText::new("Cancel").size(12.0).strong(),
+                                Vec2::new(62.0, 32.0),
+                                6,
+                                ButtonKind::Ghost,
+                            )
+                            .clicked()
+                            {
+                                self.reset();
+                                out.close = true;
+                            }
+                        });
+                    },
+                );
             });
 
         // Submit last, after the footer has been laid out: returning early

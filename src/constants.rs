@@ -6,6 +6,8 @@ use eframe::egui::{Color32, Pos2};
 
 pub const APP_ID: &str = "PiDA-Tray";
 pub const APP_NAME: &str = "PiDA Tray";
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const REPO_URL: &str = env!("CARGO_PKG_REPOSITORY");
 pub const APP_DIR_NAME: &str = "PiDA-Tray";
 pub const AUTOSTART_VALUE_NAME: &str = "PiDATray";
 
