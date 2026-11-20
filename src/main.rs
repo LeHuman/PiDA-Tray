@@ -134,6 +134,79 @@ fn hwnd_from_frame(frame: &eframe::Frame) -> Option<windows::Win32::Foundation::
     Some(HWND(win32.hwnd.get() as *mut core::ffi::c_void))
 }
 
+/// Private message: apply a queued flyout geometry from the window procedure.
+#[cfg(windows)]
+const WM_PIDA_SET_GEOMETRY: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 1;
+
+/// Geometry waiting to be applied by the window procedure.
+#[cfg(windows)]
+static PENDING_GEOMETRY: std::sync::Mutex<Option<(i32, i32, i32, i32)>> =
+    std::sync::Mutex::new(None);
+
+/// Move and size the flyout in one Win32 transaction, between frames.
+///
+/// `ViewportCommand::InnerSize` and `OuterPosition` become two separate
+/// `SetWindowPos` calls, and the window can exist at an intermediate geometry
+/// (top moved, size not yet applied, or the reverse) for a composition. The
+/// card is anchored to the client bottom, so that intermediate geometry paints
+/// it tens of pixels off, or pushes its rounded bottom below the desktop where
+/// the screen edge cuts the arcs square.
+///
+/// The request is posted rather than applied here: eframe's painter reads the
+/// native client size when it presents, so resizing during a frame would render
+/// a layout built for the old size into the new one.
+#[cfg(windows)]
+pub(crate) fn request_window_geometry(frame: &eframe::Frame, rect: (i32, i32, i32, i32)) -> bool {
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
+
+    let Some(hwnd) = hwnd_from_frame(frame) else {
+        return false;
+    };
+    let Ok(mut pending) = PENDING_GEOMETRY.lock() else {
+        return false;
+    };
+    *pending = Some(rect);
+    drop(pending);
+    unsafe { PostMessageW(Some(hwnd), WM_PIDA_SET_GEOMETRY, WPARAM(0), LPARAM(0)).is_ok() }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn request_window_geometry(_frame: &eframe::Frame, _rect: (i32, i32, i32, i32)) -> bool {
+    false
+}
+
+/// Clip the window, including its hit-testing, to the card.
+///
+/// The session canvas leaves an empty strip above a short card. Left in the
+/// window, that strip would swallow clicks meant for whatever is behind the
+/// flyout, so the window region ends just above the card's top edge.
+#[cfg(windows)]
+pub(crate) fn set_window_region(frame: &eframe::Frame, top_px: i32) -> bool {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::Graphics::Gdi::{CreateRectRgn, SetWindowRgn};
+    use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
+
+    let Some(hwnd) = hwnd_from_frame(frame) else {
+        return false;
+    };
+    let mut client = RECT::default();
+    if unsafe { GetClientRect(hwnd, &mut client) }.is_err() {
+        return false;
+    }
+    let top = top_px.clamp(0, client.bottom);
+    let rgn = unsafe { CreateRectRgn(0, top, client.right, client.bottom) };
+    if rgn.is_invalid() {
+        return false;
+    }
+    unsafe { SetWindowRgn(hwnd, Some(rgn), true) != 0 }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn set_window_region(_frame: &eframe::Frame, _top_px: i32) -> bool {
+    false
+}
+
 /// DWM draws a rectangular drop shadow plus a 1px border around every window
 /// that has frame styles, even when `decorations(false)` hides the title bar.
 /// Furthermore, `egui-winit` passes `with_undecorated_shadow(true)` on Windows
@@ -155,9 +228,9 @@ fn ensure_borderless_window_policy(frame: &eframe::Frame) {
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CallWindowProcW, DefWindowProcW, GWL_EXSTYLE, GWL_STYLE, GWLP_WNDPROC, SWP_FRAMECHANGED,
-        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos,
-        WM_ERASEBKGND, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCPAINT, WNDPROC, WS_BORDER, WS_CAPTION,
-        WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU,
+        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW,
+        SetWindowPos, WM_ERASEBKGND, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCPAINT, WNDPROC, WS_BORDER,
+        WS_CAPTION, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU,
     };
 
     static HOOKED_HWND: AtomicIsize = AtomicIsize::new(0);
@@ -182,6 +255,24 @@ fn ensure_borderless_window_policy(frame: &eframe::Frame) {
         }
         if msg == WM_ERASEBKGND {
             return LRESULT(1);
+        }
+        if msg == WM_PIDA_SET_GEOMETRY {
+            if let Ok(mut pending) = PENDING_GEOMETRY.lock()
+                && let Some((x, y, w, h)) = pending.take()
+            {
+                let _ = unsafe {
+                    SetWindowPos(
+                        hwnd,
+                        None,
+                        x,
+                        y,
+                        w,
+                        h,
+                        SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+                    )
+                };
+            }
+            return LRESULT(0);
         }
         let orig = ORIG_WNDPROC.load(Ordering::Acquire);
         if orig != 0 {

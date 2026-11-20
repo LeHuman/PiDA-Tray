@@ -12,7 +12,8 @@ use std::{
 };
 
 use eframe::egui::{
-    self, CornerRadius, Margin, Rect, RichText, Stroke, StrokeKind, Ui, ViewportCommand, vec2,
+    self, CornerRadius, Margin, Rect, RichText, Sense, Stroke, StrokeKind, Ui, ViewportCommand,
+    vec2,
 };
 
 use crate::{
@@ -75,6 +76,11 @@ pub struct PiDaTrayApp {
     /// animation so the window is resized once per transition rather than
     /// every frame (per-frame resizes make Windows composite stale frames).
     last_window_height: f32,
+    /// Client height whose native geometry change has been requested but not
+    /// yet observed. Suppresses the user-drag detector until it lands.
+    pending_window_height: Option<f32>,
+    /// Give-up counter for a pending geometry request the OS did not honour.
+    pending_frames: u8,
     /// Set when the user drags the flyout to a custom height.
     manual_height: Option<f32>,
     /// Content-fit cap for this monitor's work area.
@@ -102,6 +108,29 @@ pub struct PiDaTrayApp {
     /// Sign of the last transition step, to restart the ease from the rendered
     /// card height when the direction reverses.
     view_dir: f32,
+    /// Client height held for the whole shown session. Windows composites the
+    /// previous surface across a native resize, so changing the window while it
+    /// is visible shows one stale frame (the page jumping, or the card's bottom
+    /// edge going missing). The card animates inside this canvas instead, and
+    /// the window only changes size during reveal or an explicit resize, while
+    /// still cloaked.
+    canvas_locked: bool,
+    /// Last applied window region top, in physical pixels.
+    region_top: Option<i32>,
+    /// Content-fit card heights measured last session, used to size the next
+    /// canvas before anything is laid out.
+    devices_card_h: f32,
+    settings_card_h: f32,
+    /// Largest card height the current content needs; the resize grip cannot
+    /// go past it.
+    content_max_h: f32,
+    /// Smallest card height that still shows one tile row (or the whole empty
+    /// state); the resize grip cannot go below it.
+    content_min_h: f32,
+    /// Card height when a top-edge resize drag started.
+    resize_from: Option<f32>,
+    /// Pointer screen y when that drag started.
+    resize_start_y: Option<f32>,
 }
 
 impl PiDaTrayApp {
@@ -153,6 +182,8 @@ impl PiDaTrayApp {
             anchor: None,
             last_viewport_height,
             last_window_height: last_viewport_height,
+            pending_window_height: None,
+            pending_frames: 0,
             manual_height,
             max_height: FLYOUT_MAX_HEIGHT,
             size_settle: 0,
@@ -169,14 +200,25 @@ impl PiDaTrayApp {
             view_mix: 0.0,
             view_from_height: None,
             view_dir: 0.0,
+            canvas_locked: false,
+            region_top: None,
+            devices_card_h: 0.0,
+            settings_card_h: 0.0,
+            content_max_h: 0.0,
+            content_min_h: 0.0,
+            resize_from: None,
+            resize_start_y: None,
         }
     }
 
     // -- window management ---------------------------------------------------
 
-    /// Logical `OuterPosition` for the current anchor and height. Also refreshes
-    /// `max_height` from the monitor work area.
-    fn compute_placement(&mut self, ctx: &egui::Context, height: f32) -> Option<egui::Pos2> {
+    /// Physical window rect (x, y, w, h) for the current anchor and height.
+    fn compute_placement_px(
+        &mut self,
+        ctx: &egui::Context,
+        height: f32,
+    ) -> Option<(i32, i32, i32, i32)> {
         let anchor = self.anchor?;
         let (work, monitor) = tray::monitor_rects_at(anchor.0, anchor.1)?;
         let current_ppp = ctx.pixels_per_point().max(0.5);
@@ -194,14 +236,67 @@ impl PiDaTrayApp {
             monitor,
             FLYOUT_SCREEN_MARGIN * target_ppp,
         );
-        // `egui-winit` multiplies `OuterPosition` by the window's *current* `pixels_per_point`.
-        Some(egui::pos2(x / current_ppp, y / current_ppp))
+        Some((
+            x.round() as i32,
+            y.round() as i32,
+            size_px.0.round() as i32,
+            size_px.1.round() as i32,
+        ))
+    }
+
+    /// Logical `OuterPosition` for the current anchor and height. Also refreshes
+    /// `max_height` from the monitor work area.
+    fn compute_placement(&mut self, ctx: &egui::Context, height: f32) -> Option<egui::Pos2> {
+        let current_ppp = ctx.pixels_per_point().max(0.5);
+        self.compute_placement_px(ctx, height)
+            .map(|(x, y, _, _)| egui::pos2(x as f32 / current_ppp, y as f32 / current_ppp))
     }
 
     fn place(&mut self, ctx: &egui::Context, height: f32) {
         if let Some(pos) = self.compute_placement(ctx, height) {
             ctx.send_viewport_cmd(ViewportCommand::OuterPosition(pos));
         }
+    }
+
+    /// Client height for the shown session: the tallest card the content can
+    /// need, so no transition has to resize the visible window. A dragged
+    /// height only ever shrinks the card, so it can never exceed this.
+    fn canvas_target(&self) -> f32 {
+        let devices = if self.devices_card_h > 0.0 {
+            self.devices_card_h
+        } else {
+            FLYOUT_MIN_HEIGHT + devices::EXPANDED_HEIGHT_GUESS
+        };
+        let settings = if self.settings_card_h > 0.0 {
+            self.settings_card_h
+        } else {
+            // The settings form is the taller view the first time it opens.
+            devices
+        };
+        // One expanded card must fit without resizing the window.
+        let expanded = devices + devices::EXPANDED_HEIGHT_GUESS;
+        settings
+            .max(expanded)
+            .clamp(FLYOUT_MIN_HEIGHT, self.max_height)
+    }
+
+    /// Request one atomic native move-and-resize. Returns false when the
+    /// platform path is unavailable, so callers fall back to viewport commands.
+    fn apply_window_height(
+        &mut self,
+        ctx: &egui::Context,
+        frame: &eframe::Frame,
+        height: f32,
+    ) -> bool {
+        let Some(rect) = self.compute_placement_px(ctx, height) else {
+            return false;
+        };
+        if !crate::request_window_geometry(frame, rect) {
+            return false;
+        }
+        self.pending_window_height = Some(height);
+        self.pending_frames = 8;
+        true
     }
 
     fn park_window(&mut self, ctx: &egui::Context) {
@@ -229,7 +324,7 @@ impl PiDaTrayApp {
         // The parked window's size, not the card's animated height: they only
         // differ if the flyout was hidden mid-transition.
         let previous_height = self.last_window_height;
-        let desired = self.manual_height.unwrap_or(previous_height);
+        let desired = self.canvas_target();
         let target = quantize_height(ctx, desired.clamp(FLYOUT_MIN_HEIGHT, self.max_height));
         let pos = self.compute_placement(ctx, target);
 
@@ -239,9 +334,17 @@ impl PiDaTrayApp {
         self.shown_at = None;
         self.seen_focused_while_shown = false;
         self.shared.set_visible(true);
-        self.last_viewport_height = target;
+        // Start the card at its known content height, not at the canvas: the
+        // first painted frame is the one the reveal uncloaks.
+        self.last_viewport_height = self.manual_height.unwrap_or(if self.devices_card_h > 0.0 {
+            self.devices_card_h
+        } else {
+            target
+        });
         self.last_window_height = target;
         self.size_settle = 3;
+        self.canvas_locked = false;
+        self.region_top = None;
 
         // Fast path: the parked swap chain already holds a frame at exactly
         // this size, so `logic` can move and uncloak the window in one tick
@@ -280,6 +383,8 @@ impl PiDaTrayApp {
         self.view_mix = 0.0;
         self.view_from_height = None;
         self.view_dir = 0.0;
+        self.canvas_locked = false;
+        self.region_top = None;
         self.settings.reset();
         self.shown_at = None;
         self.seen_focused_while_shown = false;
@@ -522,10 +627,15 @@ impl PiDaTrayApp {
         self.settings.show(ui, &self.shared, &self.poller)
     }
 
-    fn draw(&mut self, ui: &mut egui::Ui) {
+    fn draw(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.advance_view_mix(&ctx);
         let snap = self.shared.snapshot();
+
+        // Height the card is painted at in this frame. The settle checks at the
+        // end of the frame use it, so the window region never shrinks before the
+        // final-height card has actually been painted.
+        let card_painted = self.last_viewport_height;
 
         let card_response = egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
@@ -538,9 +648,8 @@ impl PiDaTrayApp {
                 // window every frame makes Windows composite stale frames and
                 // tears the bottom corners.
                 let viewport = ui.max_rect();
-                let card_h = self
-                    .last_viewport_height
-                    .clamp(FLYOUT_MIN_HEIGHT, viewport.height().max(FLYOUT_MIN_HEIGHT));
+                let card_h =
+                    card_painted.clamp(FLYOUT_MIN_HEIGHT, viewport.height().max(FLYOUT_MIN_HEIGHT));
                 let card_rect = Rect::from_min_max(
                     egui::pos2(viewport.left(), viewport.bottom() - card_h),
                     viewport.max,
@@ -663,15 +772,17 @@ impl PiDaTrayApp {
         );
         if reset_size {
             self.manual_height = None;
-            self.last_viewport_height = FLYOUT_DEFAULT_HEIGHT;
+            let target = self.canvas_target();
+            self.last_viewport_height = target;
+            self.last_window_height = target;
+            self.region_top = None;
             self.shared.update(|s| s.settings.flyout_height = None);
             self.shared.save_settings();
-            self.size_settle = 3;
-            ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(
-                FLYOUT_OUTER_WIDTH,
-                self.last_viewport_height,
-            )));
-            self.place(&ctx, self.last_viewport_height);
+            if !self.apply_window_height(&ctx, frame, target) {
+                self.size_settle = 3;
+                ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(FLYOUT_OUTER_WIDTH, target)));
+                self.place(&ctx, target);
+            }
             ctx.request_repaint();
         }
         if close_settings {
@@ -711,6 +822,23 @@ impl PiDaTrayApp {
         // auto-fit branch would immediately snap the window back.
         if self.size_settle > 0 {
             self.size_settle -= 1;
+        } else if let Some(pending) = self.pending_window_height {
+            // Our own native geometry request is in flight; the size change it
+            // causes is not a user drag. Acknowledge the observed client rect
+            // instead of counting frames, but give up if the OS never honours
+            // the request (a clamped or adjusted size).
+            let actual = ctx.input(|i| i.viewport().inner_rect.map(|rect| rect.height()));
+            if actual.is_some_and(|h| (h - pending).abs() <= 1.0) {
+                self.pending_window_height = None;
+            } else {
+                self.pending_frames = self.pending_frames.saturating_sub(1);
+                if self.pending_frames == 0 {
+                    self.pending_window_height = None;
+                    if let Some(actual) = actual {
+                        self.last_window_height = actual;
+                    }
+                }
+            }
         } else if let Some(actual) =
             ctx.input(|i| i.viewport().inner_rect.map(|rect| rect.height()))
             && (actual - self.last_window_height).abs() > 2.0
@@ -719,6 +847,7 @@ impl PiDaTrayApp {
             self.manual_height = Some(height);
             self.last_viewport_height = height;
             self.last_window_height = height;
+            self.region_top = None;
             self.dirty_height = true;
             self.place(&ctx, height);
         }
@@ -728,17 +857,81 @@ impl PiDaTrayApp {
         // so measure the body independently of the current window height.
         let chrome = 2.0 * (CARD_BLEED + CARD_STROKE_WIDTH);
         let fit = |body: f32| (chrome + header_h + body).ceil().max(FLYOUT_MIN_HEIGHT);
-        let natural_h = fit(body_required);
-        let measured_h = self
-            .manual_height
-            .unwrap_or(natural_h)
-            .clamp(FLYOUT_MIN_HEIGHT, self.max_height);
-        // Settled height. Independent of the current window size, so the
-        // window can be pre-sized once instead of tracking the animation.
-        let target_h = self
-            .manual_height
+
+        // Remember what each view needs, so the next session's canvas covers it.
+        match self.view {
+            View::Devices => self.devices_card_h = fit(body_target),
+            View::Settings => self.settings_card_h = fit(body_target),
+        }
+
+        // A dragged height may only shrink the flyout. Its bounds follow the
+        // content: never taller than the tiles need, never shorter than one row
+        // of them (or the empty state, which is already smaller than a row).
+        // Keeping the saved height inside the bounds pulls it down when devices
+        // go away and back up when the grid becomes too tall for it.
+        let content_h = fit(body_target).clamp(FLYOUT_MIN_HEIGHT, self.max_height);
+        let content_min_h = match self.devices.one_row_height() {
+            Some(row) => fit(2.0 * FLYOUT_PADDING + row).min(content_h),
+            None => content_h,
+        }
+        .max(FLYOUT_MIN_HEIGHT);
+        self.content_max_h = content_h;
+        self.content_min_h = content_min_h;
+        if let Some(manual) = self.manual_height {
+            let bounded = manual.clamp(content_min_h, content_h);
+            if (bounded - manual).abs() > 0.5 {
+                self.manual_height = Some(bounded);
+                self.dirty_height = true;
+            }
+        }
+
+        // Session canvas. While the flyout is still cloaked the window may
+        // change size; once it is on screen the geometry is frozen until hide.
+        // Windows composites the previous surface across a native resize, so a
+        // visible resize always shows one stale frame: the page jumps, or the
+        // card's bottom edge disappears into the crop.
+        if self.reveal_phase == RevealPhase::Shown {
+            self.canvas_locked = true;
+        }
+        let want_canvas = self.canvas_target();
+        if !self.canvas_locked && (want_canvas - self.last_window_height).abs() > 0.5 {
+            self.last_window_height = want_canvas;
+            if !self.apply_window_height(&ctx, frame, want_canvas) {
+                ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(
+                    FLYOUT_OUTER_WIDTH,
+                    want_canvas,
+                )));
+                self.size_settle = 3;
+            }
+            self.reveal_phase = RevealPhase::Settling;
+            ctx.request_repaint();
+            return;
+        }
+        if self.reveal_phase == RevealPhase::Settling {
+            self.place(&ctx, self.last_window_height);
+            self.parked = false;
+            self.reveal_phase = RevealPhase::ReadyToUncloak;
+            ctx.request_repaint();
+        }
+
+        // The card never exceeds the window that actually exists.
+        let canvas = self.last_window_height.max(FLYOUT_MIN_HEIGHT);
+        // A dragged height applies to the device grid only: the settings form
+        // is always shown whole, and its own content height is inside the
+        // canvas, so that never resizes the window either.
+        let manual = match self.view {
+            View::Devices => self.manual_height,
+            View::Settings => None,
+        };
+        let measured_h = manual
+            .unwrap_or(fit(body_required))
+            .clamp(FLYOUT_MIN_HEIGHT, canvas);
+        // Settled height, independent of the current card height so the ease
+        // has a fixed destination.
+        let target_h = manual
             .unwrap_or(fit(body_target))
-            .clamp(FLYOUT_MIN_HEIGHT, self.max_height);
+            .min(content_h)
+            .clamp(FLYOUT_MIN_HEIGHT, canvas);
 
         // Ease the card toward the height its content needs right now. Only
         // the view transition animates; content changes (card expand/collapse)
@@ -767,40 +960,56 @@ impl PiDaTrayApp {
         };
         self.last_viewport_height = card_next;
 
-        // Keep the window at least as tall as the card. A growing target gets
-        // room up front (the empty strip appears above the card and is
-        // invisible); a shrinking card keeps the old window until it has
-        // arrived, then the window is resized once. Never resize per frame:
-        // resizing while painting makes Windows composite stale frames.
-        let arrived = (card_next - target_h).abs() <= 0.5;
-        let want_window = if target_h > self.last_window_height + 0.5
-            || card_next > self.last_window_height + 0.5
-        {
-            target_h.max(card_next)
-        } else if arrived && target_h < self.last_window_height - 0.5 {
-            target_h
+        // Clip the window to the card. Above a short card the canvas is empty
+        // and transparent; left in the window it would swallow clicks meant for
+        // whatever is behind. While the card animates, the region stays open so
+        // a growing card is never clipped, and the temporary input band is the
+        // same tradeoff the animated card already had. The margin above the card
+        // keeps the resize grip live.
+        let view_animating = self.view_mix > 0.001 && self.view_mix < 0.999;
+        let settled = (card_painted - target_h).abs() <= 0.5
+            && (card_next - target_h).abs() <= 0.5
+            && !view_animating;
+        let ppp = ctx.pixels_per_point().max(0.5);
+        let top_px = if settled {
+            (((canvas - card_next) * ppp).round() as i32 - 6).max(0)
         } else {
-            self.last_window_height
+            0
         };
+        if self.region_top != Some(top_px) && crate::set_window_region(frame, top_px) {
+            self.region_top = Some(top_px);
+        }
 
-        if (want_window - self.last_window_height).abs() > 0.5 {
-            self.last_window_height = want_window;
-            ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(
-                FLYOUT_OUTER_WIDTH,
-                want_window,
-            )));
-            self.size_settle = 3;
-            if self.reveal_phase == RevealPhase::Shown {
-                self.place(&ctx, want_window);
-            } else {
-                self.reveal_phase = RevealPhase::Settling;
-            }
-            ctx.request_repaint();
-        } else if self.reveal_phase == RevealPhase::Settling {
-            self.place(&ctx, want_window);
-            self.parked = false;
-            self.reveal_phase = RevealPhase::ReadyToUncloak;
-            ctx.request_repaint();
+        // Height grip on the card's top edge. The native top border sits at the
+        // canvas top, far above the card and outside the window region, so the
+        // drag lives on the card itself: it only moves the painted height and
+        // never resizes the native window.
+        let grip = Rect::from_min_max(
+            egui::pos2(outer.left(), outer.top() - 5.0),
+            egui::pos2(outer.right(), outer.top() + 3.0),
+        );
+        let grip = ui.interact(grip, ui.scope_id().with("card-resize-grip"), Sense::drag());
+        if grip.hovered() || grip.dragged() {
+            ctx.set_cursor_icon(egui::CursorIcon::ResizeVertical);
+        }
+        if grip.drag_started() {
+            self.resize_from = Some(self.last_viewport_height);
+            self.resize_start_y = ctx.input(|i| i.pointer.interact_pos().map(|p| p.y));
+        }
+        if grip.dragged()
+            && let (Some(from), Some(start_y)) = (self.resize_from, self.resize_start_y)
+            && let Some(pointer_y) = ctx.input(|i| i.pointer.interact_pos().map(|p| p.y))
+        {
+            let lo = self.content_min_h.max(FLYOUT_MIN_HEIGHT);
+            let hi = self.content_max_h.min(canvas).min(self.max_height).max(lo);
+            let height = (from - (pointer_y - start_y)).clamp(lo, hi);
+            self.manual_height = Some(height);
+            self.last_viewport_height = height;
+            self.dirty_height = true;
+        }
+        if grip.drag_stopped() {
+            self.resize_from = None;
+            self.resize_start_y = None;
         }
     }
 }
@@ -879,7 +1088,7 @@ impl eframe::App for PiDaTrayApp {
             crate::set_window_cloaked(frame, true);
             return;
         }
-        self.draw(ui);
+        self.draw(ui, frame);
         if !self.visible {
             crate::set_window_cloaked(frame, true);
         }

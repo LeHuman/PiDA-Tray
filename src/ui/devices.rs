@@ -37,7 +37,8 @@ const TILE_STRIP_WIDTH: f32 = 22.0;
 const LONG_PRESS: Duration = Duration::from_millis(280);
 const CLICK_AWAY_GRACE: Duration = Duration::from_millis(150);
 const EXPAND_ANIMATION: f32 = 0.18;
-const EXPANDED_HEIGHT_GUESS: f32 = 240.0;
+/// Body height reserved for one expanded card before it has been measured.
+pub const EXPANDED_HEIGHT_GUESS: f32 = 240.0;
 
 struct PressState {
     started: Instant,
@@ -71,6 +72,8 @@ pub struct DevicesView {
     last_openness: f32,
     /// Body height currently allocated to the animated expanded card.
     expand_visible: f32,
+    /// Height of one tile row (tiles are square), zero with no tiles.
+    row_h: f32,
 }
 
 fn decode_png(bytes: &[u8]) -> Result<ColorImage, ApiError> {
@@ -336,6 +339,12 @@ impl DevicesView {
         }
     }
 
+    /// Height of one tile row, or `None` when there are no tiles (the empty
+    /// state is already as short as it can be).
+    pub fn one_row_height(&self) -> Option<f32> {
+        (self.row_h > 0.0).then_some(self.row_h)
+    }
+
     pub fn flush_all(&mut self, shared: &Shared, poller: &Poller) {
         let keys: Vec<_> = self.pending.keys().cloned().collect();
         for key in keys {
@@ -345,6 +354,7 @@ impl DevicesView {
 
     pub fn show(&mut self, ui: &mut Ui, snap: &Snapshot, shared: &Arc<Shared>, poller: &Poller) {
         if snap.catalog.is_empty() {
+            self.row_h = 0.0;
             let msg = if snap.syncing {
                 "Loading devices…"
             } else {
@@ -359,6 +369,9 @@ impl DevicesView {
             / TILE_COLUMNS as f32)
             .floor()
             .max(88.0);
+        // Tiles are square, so one row of them is `tile_w` tall. The flyout may
+        // not be dragged shorter than that.
+        self.row_h = tile_w;
         // Rows are spaced explicitly; egui's inherited vertical item spacing
         // would otherwise add a trailing gap under the last row.
         ui.spacing_mut().item_spacing.y = 0.0;
