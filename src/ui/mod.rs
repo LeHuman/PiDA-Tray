@@ -504,10 +504,10 @@ impl PiDaTrayApp {
                         let mut close_settings = false;
                         let mut reset_size = false;
 
-                        // The settings sheet slides in from the right over the
-                        // device grid; closing slides it back out. The sheet
-                        // carries its own surface-coloured backdrop so the grid
-                        // never ghosts through the form.
+                        // The settings sheet slides up over the device grid;
+                        // closing slides it back down. The sheet carries its
+                        // own surface-coloured backdrop so the grid never
+                        // ghosts through the form.
                         let settings_target = self.view == View::Settings;
                         let fade = egui::emath::easing::cubic_out(self.view_mix);
 
@@ -519,11 +519,11 @@ impl PiDaTrayApp {
                                 self.devices_body(&mut base, &snap);
                             }
                             let scene = ui.available_rect_before_wrap();
-                            let slide = (1.0 - fade) * scene.width();
+                            let slide = (1.0 - fade) * scene.height();
                             ui.scope(|ui| {
                                 ui.set_clip_rect(scene);
                                 ui.with_visual_transform(
-                                    egui::emath::TSTransform::from_translation(vec2(slide, 0.0)),
+                                    egui::emath::TSTransform::from_translation(vec2(0.0, slide)),
                                     |ui| {
                                         ui.painter().rect_filled(
                                             ui.available_rect_before_wrap(),
@@ -540,12 +540,12 @@ impl PiDaTrayApp {
                             let scene = ui.available_rect_before_wrap();
                             scroll_delta = self.devices_body(ui, &snap);
                             if fade > 0.001 {
-                                let slide = (1.0 - fade) * scene.width();
+                                let slide = (1.0 - fade) * scene.height();
                                 let mut outgoing =
                                     ui.new_child(egui::UiBuilder::new().max_rect(scene));
                                 outgoing.set_clip_rect(scene);
                                 outgoing.with_visual_transform(
-                                    egui::emath::TSTransform::from_translation(vec2(slide, 0.0)),
+                                    egui::emath::TSTransform::from_translation(vec2(0.0, slide)),
                                     |ui| {
                                         ui.painter().rect_filled(
                                             ui.available_rect_before_wrap(),

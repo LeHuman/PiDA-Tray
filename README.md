@@ -37,7 +37,7 @@ Desktop access to server-managed home automation devices should not require keep
 - Expanding a tile animates in place to the full-width card with every control, status value, and action; clicking outside animates it closed. Expanded cards also expose ↑/↓ device-reorder controls.
 - Reorder devices with the ↑/↓ controls in an expanded card. Order is saved by schema path, new devices append, and missing devices keep their slot and cached state so a transient schema omission does not lose their configuration.
 - Subtle synthesized UI ticks for toggles, actions, and expansion; can be disabled with **Settings → Subtle UI sounds**.
-- Opening Settings slides the page in over the device grid and eases the flyout between its two heights; closing slides it back out.
+- Opening Settings slides the page up over the device grid and eases the flyout between its two heights; closing slides it back down.
 - Taskbar-anchored dark flyout with focus-loss auto-hide, pin toggle, and optional Windows startup registration (`HKCU\...\Run`).
 - Mapped, pre-painted flyout with a one-tick reveal: no white flash or resize jump when opening, and no unpainted swap chain after hiding.
 
