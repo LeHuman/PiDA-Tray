@@ -45,6 +45,25 @@ fn quantize_height(ctx: &egui::Context, height: f32) -> f32 {
     (height * ppp).ceil() / ppp
 }
 
+/// Ease-in-out on [0, 1] with zero slope at both ends (the close curve).
+fn smoothstep(x: f32) -> f32 {
+    let x = x.clamp(0.0, 1.0);
+    x * x * (3.0 - 2.0 * x)
+}
+
+/// Inverse of `cubic_out`, so a mid-flight reversal can keep the settled
+/// fraction it is currently showing.
+fn invert_cubic_out(y: f32) -> f32 {
+    let y = y.clamp(0.0, 1.0);
+    1.0 - (1.0 - y).cbrt()
+}
+
+/// Inverse of `smoothstep`, for the same reason on the close curve.
+fn invert_smoothstep(y: f32) -> f32 {
+    let y = y.clamp(0.0, 1.0);
+    0.5 - ((1.0 - 2.0 * y).asin() / 3.0).sin()
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
     Devices,
@@ -111,6 +130,9 @@ pub struct PiDaTrayApp {
     /// Sign of the last transition step, to restart the ease from the rendered
     /// card height when the direction reverses.
     view_dir: f32,
+    /// Ease value the current leg of the transition started from, so a
+    /// reversal continues the card from its current height.
+    eased_from: f32,
     /// Last applied window region, including the client size it was built for.
     region: Option<crate::WindowRegion>,
     /// Content-fit card heights measured last session, used to size the next
@@ -186,6 +208,7 @@ impl PiDaTrayApp {
             view_mix: 0.0,
             view_from_height: None,
             view_dir: 0.0,
+            eased_from: 0.0,
             region: None,
             devices_card_h: 0.0,
             settings_card_h: 0.0,
@@ -307,6 +330,7 @@ impl PiDaTrayApp {
         self.view_mix = 0.0;
         self.view_from_height = None;
         self.view_dir = 0.0;
+        self.eased_from = 0.0;
         self.shown_at = None;
         self.seen_focused_while_shown = false;
         self.shared.set_visible(true);
@@ -323,11 +347,18 @@ impl PiDaTrayApp {
         self.region = None;
 
         // Fast path: the parked swap chain already holds a frame at exactly
-        // this size, so `logic` can move and uncloak the window in one tick
-        // instead of waiting for viewport commands to round-trip.
+        // this size and the same DPI, so `logic` can move and uncloak the window
+        // in one tick instead of waiting for viewport commands to round-trip.
+        // A different monitor scale makes the parked frame the wrong size, so
+        // that case goes through `Settling` instead.
+        let same_scale = self
+            .anchor
+            .and_then(|anchor| tray::monitor_dpi_scale_at(anchor.0, anchor.1))
+            .is_none_or(|scale| (scale - ctx.pixels_per_point()).abs() <= f32::EPSILON);
         let fast = cfg!(windows)
             && !settle
             && !unmeasured
+            && same_scale
             && self.painted_once
             && pos.is_some()
             && (target - previous_height).abs() <= f32::EPSILON;
@@ -360,6 +391,7 @@ impl PiDaTrayApp {
         self.view_mix = 0.0;
         self.view_from_height = None;
         self.view_dir = 0.0;
+        self.eased_from = 0.0;
         self.resize_drag = None;
         self.region = None;
         self.settings.reset();
@@ -489,17 +521,30 @@ impl PiDaTrayApp {
         if (self.view_mix - target).abs() <= f32::EPSILON {
             self.view_from_height = None;
             self.view_dir = 0.0;
+            self.eased_from = 0.0;
             return;
         }
         let dir = (target - self.view_mix).signum();
         if self.view_dir != 0.0 && dir != self.view_dir {
-            // Reversed mid-flight: ease from the card height actually on
-            // screen, not from where the previous transition started.
+            // Reversed mid-flight. Re-parameterise `view_mix` so the new
+            // direction's curve continues from the settled fraction already on
+            // screen: the two curves differ, and switching them directly jumped
+            // the sheet and the card by a large step in one frame. The card also
+            // restarts from its current height with its ease offset recorded, so
+            // it continues from where it is instead of re-applying the curve.
+            let settled = self.settled_fraction();
+            self.view_mix = if target > 0.0 {
+                invert_cubic_out(settled)
+            } else {
+                invert_smoothstep(settled)
+            };
             self.view_from_height = Some(self.card_height);
+            self.eased_from = if target > 0.0 { settled } else { 1.0 - settled };
         }
         self.view_dir = dir;
         if self.view_from_height.is_none() {
             self.view_from_height = Some(self.card_height);
+            self.eased_from = 0.0;
         }
         let dt = ctx.input(|i| i.stable_dt).min(0.05);
         let step = dt / VIEW_ANIMATION;
@@ -509,6 +554,18 @@ impl PiDaTrayApp {
             (self.view_mix - step).max(target)
         };
         ctx.request_repaint();
+    }
+
+    /// Fraction of the settings page that is settled: 1.0 when it fully covers
+    /// the card, 0.0 when it is fully slid out. The curve depends on the
+    /// direction of travel so open and close each keep their feel.
+    fn settled_fraction(&self) -> f32 {
+        let m = self.view_mix.clamp(0.0, 1.0);
+        if self.view_dir < 0.0 {
+            smoothstep(m)
+        } else {
+            egui::emath::easing::cubic_out(m)
+        }
     }
 
     /// Device grid body; returns the body height its content needs.
@@ -648,15 +705,10 @@ impl PiDaTrayApp {
         // 0.0 = fully slid out). The card height and the sheet's slide both
         // follow this one value, so the page never gets squeezed by a card that
         // shrinks before the sheet has moved.
-        let settle_p = if self.view == View::Settings {
-            // Rise quickly, settle gently.
-            egui::emath::easing::cubic_out(self.view_mix)
-        } else {
-            // Slide away slowly at both ends, so neither the first nor the last
-            // frame of the close lands a large height step.
-            let m = self.view_mix;
-            m * m * (3.0 - 2.0 * m)
-        };
+        // One settled fraction for the sheet and the card. The curve follows the
+        // direction of travel (rise quickly / slide away gently), and a reversal
+        // re-parameterises `view_mix` so this stays continuous.
+        let settle_p = self.settled_fraction();
 
         let card_response = egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
@@ -939,13 +991,22 @@ impl PiDaTrayApp {
                 Some(from) if self.view_mix > 0.0 && self.view_mix < 1.0 => {
                     // Track the sheet's own progress: its slide and the card
                     // height follow one curve, so the page is never squeezed by
-                    // a card that shrinks before the sheet has moved.
+                    // a card that shrinks before the sheet has moved. The ease is
+                    // offset by the value it had when this leg of the transition
+                    // started, so a mid-flight reversal continues from the card's
+                    // current height instead of re-applying the curve.
                     let eased = if laid_out_view == View::Settings {
                         settle_p
                     } else {
                         1.0 - settle_p
                     };
-                    from + (measured_h - from) * eased
+                    let room = 1.0 - self.eased_from;
+                    let progress = if room <= 0.001 {
+                        1.0
+                    } else {
+                        ((eased - self.eased_from) / room).clamp(0.0, 1.0)
+                    };
+                    from + (measured_h - from) * progress
                 }
                 _ => measured_h,
             };

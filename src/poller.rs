@@ -632,10 +632,19 @@ async fn ping(client: PidaClient, shared: Arc<Shared>) {
 }
 
 async fn sync(client: PidaClient, shared: Arc<Shared>) {
-    if shared.read(|s| s.syncing) {
+    // Claim the sync flag with one lock: a read followed by an update let two
+    // dispatches both believe they were the first.
+    let first = shared.update(|s| {
+        if s.syncing {
+            false
+        } else {
+            s.syncing = true;
+            true
+        }
+    });
+    if !first {
         return;
     }
-    shared.update(|s| s.syncing = true);
 
     match client.schema().await {
         Ok(schema) => {
