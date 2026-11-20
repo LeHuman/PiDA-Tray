@@ -316,15 +316,19 @@ impl DevicesView {
     /// True while the expanded card is mid-reveal; the flyout height is still
     /// catching up, so callers can hide the transient scrollbar.
     pub fn is_animating(&self) -> bool {
-        self.expanded.is_some() && self.last_openness < 0.999
+        (self.expanded.is_some() && self.last_openness < 0.999) || self.closing
+    }
+
+    /// Whether a tile is expanded (or animating closed) right now.
+    pub fn has_expanded(&self) -> bool {
+        self.expanded.is_some()
     }
 
     /// Extra body height the expanded card still needs once it settles.
     ///
-    /// The body reports the card's *animated* reveal height, which would make
-    /// the flyout window resize on every frame of the reveal. The window is
-    /// instead pre-sized to the settled height once; the card then grows into
-    /// it.
+    /// The body reports the card's *animated* reveal height; the card grows
+    /// into the session canvas instead, so the difference is what the settled
+    /// target still has to allow for.
     pub fn expansion_extra(&self) -> f32 {
         let visible = self.expand_visible.max(0.0);
         if self.expanded.is_some() && !self.closing {
@@ -353,6 +357,8 @@ impl DevicesView {
     }
 
     pub fn show(&mut self, ui: &mut Ui, snap: &Snapshot, shared: &Arc<Shared>, poller: &Poller) {
+        // The expanded card may have been removed from the catalog by a sync.
+        self.expand_visible = 0.0;
         if snap.catalog.is_empty() {
             self.row_h = 0.0;
             let msg = if snap.syncing {
@@ -913,7 +919,7 @@ impl DevicesView {
         self.expand_visible = visible_height;
 
         // Laid out even at zero openness: the measured height is what lets the
-        // flyout pre-size its window once instead of following every frame.
+        // flyout size its card for the expansion without following every frame.
         let mut child = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(Rect::from_min_size(rect.min, vec2(width, full_height)))

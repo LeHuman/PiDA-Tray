@@ -57,6 +57,9 @@ impl CacheData {
 
     /// Atomic write: temp file + rename.
     pub fn save(&self, dir: &Path) -> std::io::Result<()> {
+        // Written from the UI thread and the poller; serialize the temp file.
+        static SAVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::fs::create_dir_all(dir)?;
         let json = serde_json::to_string(self).map_err(std::io::Error::other)?;
         let path = cache_path(dir);

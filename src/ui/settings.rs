@@ -247,7 +247,7 @@ impl SettingsView {
                         6,
                         ButtonKind::Secondary,
                     )
-                    .on_hover_text("Return to the default 720 pt height")
+                    .on_hover_text("Return to the content-fit height")
                     .clicked()
                     {
                         out.reset_size = true;
@@ -266,13 +266,6 @@ impl SettingsView {
                     }
                 });
             });
-
-        if submit && self.save(shared, poller) {
-            self.reset();
-            out.close = true;
-            out.content_height = ui.min_rect().height();
-            return out;
-        }
 
         // Push the action bar to the bottom of the card so it does not float
         // directly under the form when the flyout is taller than the content.
@@ -351,6 +344,14 @@ impl SettingsView {
                     }
                 });
             });
+
+        // Submit last, after the footer has been laid out: returning early
+        // would report a form 50 pt shorter than the page the user is looking
+        // at, and the card would shrink mid-close.
+        if submit && self.save(shared, poller) {
+            self.reset();
+            out.close = true;
+        }
 
         out.content_height = (ui.min_rect().height() - stretch).max(0.0);
         out

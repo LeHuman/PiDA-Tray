@@ -75,7 +75,7 @@ mod imp {
                         return;
                     };
                     let mut msg = MSG::default();
-                    while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                    while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
                         let _ = TranslateMessage(&msg);
                         DispatchMessageW(&msg);
                     }

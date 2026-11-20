@@ -30,7 +30,8 @@ pub struct RangeParam {
 impl RangeParam {
     /// Whether both bounds exist for a bounded slider; otherwise use a numeric stepper.
     pub fn has_slider(&self) -> bool {
-        self.min.is_some() && self.max.is_some()
+        // A reversed or empty range would panic in `clamp` or divide by zero.
+        matches!((self.min, self.max), (Some(lo), Some(hi)) if lo.is_finite() && hi.is_finite() && lo < hi)
     }
 
     pub fn clamp(&self, x: f64) -> f64 {

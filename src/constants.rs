@@ -23,7 +23,7 @@ pub const FLYOUT_OUTER_WIDTH: f32 = FLYOUT_WIDTH + 2.0 * CARD_STROKE_WIDTH + 2.0
 /// content-driven; this is only a sanity floor so a bug can't produce a
 /// degenerate window.
 pub const FLYOUT_MIN_HEIGHT: f32 = 72.0;
-/// Initial panel height; users can drag the flyout edge to change it.
+/// Initial window height before the content has been measured.
 pub const FLYOUT_DEFAULT_HEIGHT: f32 = 720.0;
 /// Upper bound; the actual cap is also clamped to the monitor work area.
 pub const FLYOUT_MAX_HEIGHT: f32 = 900.0;

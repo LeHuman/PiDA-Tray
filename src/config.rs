@@ -66,6 +66,10 @@ impl Settings {
     }
 
     pub fn save(&self, dir: &Path) -> std::io::Result<()> {
+        // The UI thread and the poller both save; they must not interleave on
+        // the shared temp file.
+        static SAVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::fs::create_dir_all(dir)?;
         let json = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
         let path = settings_path(dir);
