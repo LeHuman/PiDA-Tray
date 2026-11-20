@@ -134,48 +134,6 @@ fn hwnd_from_frame(frame: &eframe::Frame) -> Option<windows::Win32::Foundation::
     Some(HWND(win32.hwnd.get() as *mut core::ffi::c_void))
 }
 
-/// Private message: apply a queued flyout geometry from the window procedure.
-#[cfg(windows)]
-const WM_PIDA_SET_GEOMETRY: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 1;
-
-/// Geometry waiting to be applied by the window procedure.
-#[cfg(windows)]
-static PENDING_GEOMETRY: std::sync::Mutex<Option<(i32, i32, i32, i32)>> =
-    std::sync::Mutex::new(None);
-
-/// Move and size the flyout in one Win32 transaction, between frames.
-///
-/// `ViewportCommand::InnerSize` and `OuterPosition` become two separate
-/// `SetWindowPos` calls, and the window can exist at an intermediate geometry
-/// (top moved, size not yet applied, or the reverse) for a composition. The
-/// card is anchored to the client bottom, so that intermediate geometry paints
-/// it tens of pixels off, or pushes its rounded bottom below the desktop where
-/// the screen edge cuts the arcs square.
-///
-/// The request is posted rather than applied here: eframe's painter reads the
-/// native client size when it presents, so resizing during a frame would render
-/// a layout built for the old size into the new one.
-#[cfg(windows)]
-pub(crate) fn request_window_geometry(frame: &eframe::Frame, rect: (i32, i32, i32, i32)) -> bool {
-    use windows::Win32::Foundation::{LPARAM, WPARAM};
-    use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
-
-    let Some(hwnd) = hwnd_from_frame(frame) else {
-        return false;
-    };
-    let Ok(mut pending) = PENDING_GEOMETRY.lock() else {
-        return false;
-    };
-    *pending = Some(rect);
-    drop(pending);
-    unsafe { PostMessageW(Some(hwnd), WM_PIDA_SET_GEOMETRY, WPARAM(0), LPARAM(0)).is_ok() }
-}
-
-#[cfg(not(windows))]
-pub(crate) fn request_window_geometry(_frame: &eframe::Frame, _rect: (i32, i32, i32, i32)) -> bool {
-    false
-}
-
 /// Clip the window, including its hit-testing, to the card.
 ///
 /// The session canvas leaves an empty strip above a short card. Left in the
@@ -227,10 +185,12 @@ fn ensure_borderless_window_policy(frame: &eframe::Frame) {
         DwmSetWindowAttribute,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallWindowProcW, DefWindowProcW, GWL_EXSTYLE, GWL_STYLE, GWLP_WNDPROC, SWP_FRAMECHANGED,
-        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW,
-        SetWindowPos, WM_ERASEBKGND, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCPAINT, WNDPROC, WS_BORDER,
-        WS_CAPTION, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU,
+        CallWindowProcW, DefWindowProcW, GWL_EXSTYLE, GWL_STYLE, GWLP_WNDPROC, HTBOTTOM,
+        HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT,
+        SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW,
+        SetWindowPos, WM_ERASEBKGND, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCPAINT,
+        WNDPROC, WS_BORDER, WS_CAPTION, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_MAXIMIZEBOX,
+        WS_MINIMIZEBOX, WS_SYSMENU,
     };
 
     static HOOKED_HWND: AtomicIsize = AtomicIsize::new(0);
@@ -256,23 +216,33 @@ fn ensure_borderless_window_policy(frame: &eframe::Frame) {
         if msg == WM_ERASEBKGND {
             return LRESULT(1);
         }
-        if msg == WM_PIDA_SET_GEOMETRY {
-            if let Ok(mut pending) = PENDING_GEOMETRY.lock()
-                && let Some((x, y, w, h)) = pending.take()
-            {
-                let _ = unsafe {
-                    SetWindowPos(
-                        hwnd,
-                        None,
-                        x,
-                        y,
-                        w,
-                        h,
-                        SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
-                    )
-                };
+        if msg == WM_NCHITTEST {
+            // The flyout carries its own height grip on the card's top edge; a
+            // native resize border there would swallow that drag (and a click
+            // near the card's bottom edge). Keep every edge a client area.
+            let orig = ORIG_WNDPROC.load(Ordering::Acquire);
+            let hit = if orig != 0 {
+                let proc: WNDPROC = unsafe { std::mem::transmute::<isize, WNDPROC>(orig) };
+                unsafe { CallWindowProcW(proc, hwnd, msg, wparam, lparam) }
+            } else {
+                unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+            };
+            let code = hit.0 as u32;
+            let resizing = matches!(
+                code,
+                HTLEFT
+                    | HTRIGHT
+                    | HTTOP
+                    | HTTOPLEFT
+                    | HTTOPRIGHT
+                    | HTBOTTOM
+                    | HTBOTTOMLEFT
+                    | HTBOTTOMRIGHT
+            );
+            if resizing {
+                return LRESULT(HTCLIENT as isize);
             }
-            return LRESULT(0);
+            return LRESULT(hit.0);
         }
         let orig = ORIG_WNDPROC.load(Ordering::Acquire);
         if orig != 0 {

@@ -76,11 +76,6 @@ pub struct PiDaTrayApp {
     /// animation so the window is resized once per transition rather than
     /// every frame (per-frame resizes make Windows composite stale frames).
     last_window_height: f32,
-    /// Client height whose native geometry change has been requested but not
-    /// yet observed. Suppresses the user-drag detector until it lands.
-    pending_window_height: Option<f32>,
-    /// Give-up counter for a pending geometry request the OS did not honour.
-    pending_frames: u8,
     /// Set when the user drags the flyout to a custom height.
     manual_height: Option<f32>,
     /// Content-fit cap for this monitor's work area.
@@ -182,8 +177,6 @@ impl PiDaTrayApp {
             anchor: None,
             last_viewport_height,
             last_window_height: last_viewport_height,
-            pending_window_height: None,
-            pending_frames: 0,
             manual_height,
             max_height: FLYOUT_MAX_HEIGHT,
             size_settle: 0,
@@ -278,25 +271,6 @@ impl PiDaTrayApp {
         settings
             .max(expanded)
             .clamp(FLYOUT_MIN_HEIGHT, self.max_height)
-    }
-
-    /// Request one atomic native move-and-resize. Returns false when the
-    /// platform path is unavailable, so callers fall back to viewport commands.
-    fn apply_window_height(
-        &mut self,
-        ctx: &egui::Context,
-        frame: &eframe::Frame,
-        height: f32,
-    ) -> bool {
-        let Some(rect) = self.compute_placement_px(ctx, height) else {
-            return false;
-        };
-        if !crate::request_window_geometry(frame, rect) {
-            return false;
-        }
-        self.pending_window_height = Some(height);
-        self.pending_frames = 8;
-        true
     }
 
     fn park_window(&mut self, ctx: &egui::Context) {
@@ -631,6 +605,10 @@ impl PiDaTrayApp {
         let ctx = ui.ctx().clone();
         self.advance_view_mix(&ctx);
         let snap = self.shared.snapshot();
+        // The view this frame's layout used. Header actions can switch views
+        // later in the same frame, and bookkeeping keyed by "the current view"
+        // would then record the old layout's height under the new view.
+        let laid_out_view = self.view;
 
         // Height the card is painted at in this frame. The settle checks at the
         // end of the frame use it, so the window region never shrinks before the
@@ -746,15 +724,16 @@ impl PiDaTrayApp {
                     let outcome = self.settings_body(&mut sheet);
                     close_settings = outcome.close;
                     reset_size = outcome.reset_size;
-                    body_required = sheet.min_rect().height().max(scene.height());
-                    // The form pads its footer to fill the card, so its laid-out
-                    // height tracks the sheet. Use the measured form height as
-                    // the settled target instead.
+                    // The card follows the form's own height. It used to be
+                    // `max(..., scene.height())`, but with a session canvas the
+                    // scene can be much taller than the form, which pinned the
+                    // card at the canvas and left the page at its bottom.
                     body_target = if outcome.content_height > 0.0 {
                         outcome.content_height
                     } else {
-                        body_required
+                        sheet_h
                     };
+                    body_required = body_target;
                 } else {
                     body_required = self.devices_body(&mut content, &snap);
                     body_target = body_required + self.devices.expansion_extra();
@@ -808,11 +787,11 @@ impl PiDaTrayApp {
             self.region_top = None;
             self.shared.update(|s| s.settings.flyout_height = None);
             self.shared.save_settings();
-            if !self.apply_window_height(&ctx, frame, target) {
-                self.size_settle = 3;
-                ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(FLYOUT_OUTER_WIDTH, target)));
-                self.place(&ctx, target);
-            }
+            // Explicit user action, so the window may change size; go through
+            // eframe so its render surface follows the new client size.
+            self.size_settle = 3;
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(FLYOUT_OUTER_WIDTH, target)));
+            self.place(&ctx, target);
             ctx.request_repaint();
         }
         if close_settings {
@@ -852,23 +831,6 @@ impl PiDaTrayApp {
         // auto-fit branch would immediately snap the window back.
         if self.size_settle > 0 {
             self.size_settle -= 1;
-        } else if let Some(pending) = self.pending_window_height {
-            // Our own native geometry request is in flight; the size change it
-            // causes is not a user drag. Acknowledge the observed client rect
-            // instead of counting frames, but give up if the OS never honours
-            // the request (a clamped or adjusted size).
-            let actual = ctx.input(|i| i.viewport().inner_rect.map(|rect| rect.height()));
-            if actual.is_some_and(|h| (h - pending).abs() <= 1.0) {
-                self.pending_window_height = None;
-            } else {
-                self.pending_frames = self.pending_frames.saturating_sub(1);
-                if self.pending_frames == 0 {
-                    self.pending_window_height = None;
-                    if let Some(actual) = actual {
-                        self.last_window_height = actual;
-                    }
-                }
-            }
         } else if let Some(actual) =
             ctx.input(|i| i.viewport().inner_rect.map(|rect| rect.height()))
             && (actual - self.last_window_height).abs() > 2.0
@@ -889,31 +851,32 @@ impl PiDaTrayApp {
         let fit = |body: f32| (chrome + header_h + body).ceil().max(FLYOUT_MIN_HEIGHT);
 
         // Remember what each view needs, so the next session's canvas covers it.
-        match self.view {
+        match laid_out_view {
             View::Devices => self.devices_card_h = fit(body_target),
             View::Settings => self.settings_card_h = fit(body_target),
         }
 
-        // A dragged height may only shrink the flyout. Its bounds follow the
-        // content: never taller than the tiles need, never shorter than one row
-        // of them (or the empty state, which is already smaller than a row).
-        // Keeping the saved height inside the bounds pulls it down when devices
-        // go away and back up when the grid becomes too tall for it.
-        let content_h = fit(body_target).clamp(FLYOUT_MIN_HEIGHT, self.max_height);
+        // A dragged height may only shrink the flyout. Its bounds come from the
+        // device grid, which is the only view it applies to: never taller than
+        // the tiles need, never shorter than one row of them (or the empty
+        // state, which is already smaller than a row). Using the current view's
+        // height here rewrote the saved height whenever settings was open.
+        let devices_h = self.devices_card_h.max(FLYOUT_MIN_HEIGHT);
         let content_min_h = match self.devices.one_row_height() {
-            Some(row) => fit(2.0 * FLYOUT_PADDING + row).min(content_h),
-            None => content_h,
+            Some(row) => fit(2.0 * FLYOUT_PADDING + row).min(devices_h),
+            None => devices_h,
         }
         .max(FLYOUT_MIN_HEIGHT);
-        self.content_max_h = content_h;
+        self.content_max_h = devices_h;
         self.content_min_h = content_min_h;
         if let Some(manual) = self.manual_height {
-            let bounded = manual.clamp(content_min_h, content_h);
+            let bounded = manual.clamp(content_min_h, devices_h);
             if (bounded - manual).abs() > 0.5 {
                 self.manual_height = Some(bounded);
                 self.dirty_height = true;
             }
         }
+        let content_h = fit(body_target).clamp(FLYOUT_MIN_HEIGHT, self.max_height);
 
         // Session canvas. While the flyout is still cloaked the window may
         // change size; once it is on screen the geometry is frozen until hide.
@@ -926,13 +889,14 @@ impl PiDaTrayApp {
         let want_canvas = self.canvas_target();
         if !self.canvas_locked && (want_canvas - self.last_window_height).abs() > 0.5 {
             self.last_window_height = want_canvas;
-            if !self.apply_window_height(&ctx, frame, want_canvas) {
-                ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(
-                    FLYOUT_OUTER_WIDTH,
-                    want_canvas,
-                )));
-                self.size_settle = 3;
-            }
+            // Cloaked: the window is not on screen, so the split size/move
+            // commands cannot be seen, and going through eframe keeps winit's
+            // render surface in step with the new client size.
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(
+                FLYOUT_OUTER_WIDTH,
+                want_canvas,
+            )));
+            self.size_settle = 3;
             self.reveal_phase = RevealPhase::Settling;
             ctx.request_repaint();
             return;
@@ -948,8 +912,10 @@ impl PiDaTrayApp {
         let canvas = self.last_window_height.max(FLYOUT_MIN_HEIGHT);
         // A dragged height applies to the device grid only: the settings form
         // is always shown whole, and its own content height is inside the
-        // canvas, so that never resizes the window either.
-        let manual = match self.view {
+        // canvas, so that never resizes the window either. Keyed by the layout's
+        // view, so the flip frame keeps the old view's height instead of
+        // snapping straight to the new view's target.
+        let manual = match laid_out_view {
             View::Devices => self.manual_height,
             View::Settings => None,
         };
@@ -1023,14 +989,18 @@ impl PiDaTrayApp {
             egui::pos2(outer.right(), outer.top() + 3.0),
         );
         let grip = ui.interact(grip, ui.scope_id().with("card-resize-grip"), Sense::drag());
-        if grip.hovered() || grip.dragged() {
+        // The settings page always shows whole, so there is nothing to resize
+        // while it is open.
+        let grip_enabled = self.view == View::Devices;
+        if grip_enabled && (grip.hovered() || grip.dragged()) {
             ctx.set_cursor_icon(egui::CursorIcon::ResizeVertical);
         }
-        if grip.drag_started() {
+        if grip_enabled && grip.drag_started() {
             self.resize_from = Some(self.last_viewport_height);
             self.resize_start_y = ctx.input(|i| i.pointer.interact_pos().map(|p| p.y));
         }
-        if grip.dragged()
+        if grip_enabled
+            && grip.dragged()
             && let (Some(from), Some(start_y)) = (self.resize_from, self.resize_start_y)
             && let Some(pointer_y) = ctx.input(|i| i.pointer.interact_pos().map(|p| p.y))
         {
