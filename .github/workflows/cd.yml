@@ -59,6 +59,15 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
+          # The version stamp above rewrites Cargo.toml (and can touch the
+          # lock), so the tree is dirty. Restore the committed manifest and
+          # require it to match the tag before publishing.
+          git checkout -- Cargo.toml Cargo.lock
+          manifest_version=$(grep -m1 '^version = ' Cargo.toml | cut -d '"' -f 2)
+          if [ "$manifest_version" != "${{ steps.ver.outputs.version }}" ]; then
+            echo "Cargo.toml is $manifest_version but the tag is ${{ steps.ver.outputs.version }}; bump the manifest before tagging." >&2
+            exit 1
+          fi
           if [ -n "${CARGO_REGISTRY_TOKEN:-}" ]; then
             cargo publish -p pida-tray
           else
