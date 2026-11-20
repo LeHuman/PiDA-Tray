@@ -12,7 +12,7 @@ use std::{
 };
 
 use eframe::egui::{
-    self, CornerRadius, Margin, RichText, Stroke, StrokeKind, Ui, ViewportCommand, vec2,
+    self, CornerRadius, Margin, Rect, RichText, Stroke, StrokeKind, Ui, ViewportCommand, vec2,
 };
 
 use crate::{
@@ -30,6 +30,8 @@ use crate::{
 use button::{ButtonKind, pill_button};
 
 const VIEW_ANIMATION: f32 = 0.18;
+/// Corner radius of the card's inner fill (the outer radius minus its stroke).
+const SHEET_RADIUS: u8 = FLYOUT_RADIUS - CARD_STROKE_WIDTH as u8;
 
 /// Round a logical height up to a whole physical pixel. Fractional inner sizes
 /// truncate when DPI scaling converts them, which clips the card's bottom edge.
@@ -405,10 +407,11 @@ impl PiDaTrayApp {
         ctx.request_repaint();
     }
 
-    /// Device grid body; returns how far its scroll content overflows.
+    /// Device grid body; returns the body height its content needs.
     fn devices_body(&mut self, ui: &mut Ui, snap: &crate::poller::Snapshot) -> f32 {
+        let available = ui.available_height();
         let mut scroll_delta = 0.0;
-        egui::Frame::new()
+        let frame = egui::Frame::new()
             .inner_margin(Margin::same(FLYOUT_PADDING as i8))
             .show(ui, |ui| {
                 ui.set_width(FLYOUT_WIDTH - 2.0 * FLYOUT_PADDING);
@@ -484,7 +487,13 @@ impl PiDaTrayApp {
                     scroll_delta = scroll.content_size.y - scroll.inner_rect.height();
                 }
             });
-        scroll_delta
+        if snap.connection == Connection::Unconfigured {
+            // No scroll area in this branch: the frame is content-sized.
+            frame.response.rect.height()
+        } else {
+            // The scroll area fills the body, so add its under/overflow back.
+            available + scroll_delta
+        }
     }
 
     fn settings_body(&mut self, ui: &mut Ui) -> settings::SettingsOutcome {
@@ -495,104 +504,109 @@ impl PiDaTrayApp {
         let ctx = ui.ctx().clone();
         self.advance_view_mix(&ctx);
         let snap = self.shared.snapshot();
-        let mut scroll_delta = 0.0f32;
 
         let card_response = egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
                 ui.set_width(FLYOUT_OUTER_WIDTH);
 
-                egui::Frame::new()
-                    .fill(PALETTE.surface)
-                    .corner_radius(CornerRadius::same(FLYOUT_RADIUS))
-                    .stroke(Stroke::new(CARD_STROKE_WIDTH, border_card()))
-                    .inner_margin(Margin::same(0))
-                    // Keep the border and its anti-aliasing off the window's
-                    // swap-chain edge; the bleed is transparent.
-                    .outer_margin(Margin::same(CARD_BLEED as i8))
-                    .show(ui, |ui| {
-                        ui.set_width(FLYOUT_WIDTH);
-                        ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+                // Fixed shell derived from the actual client viewport. It does
+                // not follow the content, so the card's rounded bottom edge is
+                // present on every frame, including while the flyout animates.
+                let viewport = ui.max_rect();
+                let outer = viewport.shrink(CARD_BLEED);
+                let inner = outer.shrink(CARD_STROKE_WIDTH);
+                ui.painter()
+                    .rect_filled(outer, CornerRadius::same(FLYOUT_RADIUS), PALETTE.surface);
 
-                        let head = header::show(ui, &snap, self.view == View::Settings);
-                        let mut close_settings = false;
-                        let mut reset_size = false;
+                let mut content = ui.new_child(egui::UiBuilder::new().max_rect(inner));
+                content.set_clip_rect(inner);
+                content.set_width(FLYOUT_WIDTH);
+                content.spacing_mut().item_spacing = vec2(0.0, 0.0);
 
-                        // The settings sheet slides up over the device grid;
-                        // closing slides it back down. The sheet carries its
-                        // own surface-coloured backdrop so the grid never
-                        // ghosts through the form.
-                        let settings_target = self.view == View::Settings;
-                        let fade = egui::emath::easing::cubic_out(self.view_mix);
+                let head = header::show(&mut content, &snap, self.view == View::Settings);
+                let header_h = content.cursor().top() - inner.top();
+                let mut close_settings = false;
+                let mut reset_size = false;
+                let body_required;
 
-                        if settings_target {
-                            if fade < 0.999 {
-                                let rect = ui.available_rect_before_wrap();
-                                let mut base = ui.new_child(egui::UiBuilder::new().max_rect(rect));
-                                base.set_clip_rect(rect);
-                                self.devices_body(&mut base, &snap);
-                            }
-                            let scene = ui.available_rect_before_wrap();
-                            let slide = (1.0 - fade) * scene.height();
-                            ui.scope(|ui| {
-                                // Only clip while sliding; a fully open sheet
-                                // may paint into the card's 1px stroke area so
-                                // the footer reaches the border without a seam.
-                                if fade < 0.999 {
-                                    ui.set_clip_rect(scene);
-                                }
-                                ui.with_visual_transform(
-                                    egui::emath::TSTransform::from_translation(vec2(0.0, slide)),
-                                    |ui| {
-                                        ui.painter().rect_filled(
-                                            ui.available_rect_before_wrap(),
-                                            0.0,
-                                            PALETTE.surface,
-                                        );
-                                        let outcome = self.settings_body(ui);
-                                        close_settings = outcome.close;
-                                        reset_size = outcome.reset_size;
-                                    },
-                                );
-                            });
-                        } else {
-                            let scene = ui.available_rect_before_wrap();
-                            scroll_delta = self.devices_body(ui, &snap);
-                            if fade > 0.001 {
-                                let slide = (1.0 - fade) * scene.height();
-                                let mut outgoing =
-                                    ui.new_child(egui::UiBuilder::new().max_rect(scene));
-                                outgoing.set_clip_rect(scene);
-                                outgoing.with_visual_transform(
-                                    egui::emath::TSTransform::from_translation(vec2(0.0, slide)),
-                                    |ui| {
-                                        ui.painter().rect_filled(
-                                            ui.available_rect_before_wrap(),
-                                            0.0,
-                                            PALETTE.surface,
-                                        );
-                                        self.settings_body(ui);
-                                    },
-                                );
-                            }
-                        }
-                        (head, close_settings, reset_size, scroll_delta)
-                    })
+                // The settings sheet slides up over the device grid; closing
+                // slides it back down. The sheet is laid out at an offset rect
+                // but masked by a *fixed* screen-space clip: visual transforms
+                // also move the clip, letting a square backdrop paint outside
+                // the card's rounded bottom.
+                let settings_target = self.view == View::Settings;
+                let fade = egui::emath::easing::cubic_out(self.view_mix);
+                let scene = content.available_rect_before_wrap();
+
+                if settings_target {
+                    if fade < 0.999 {
+                        let mut base = content.new_child(egui::UiBuilder::new().max_rect(scene));
+                        base.set_clip_rect(scene);
+                        self.devices_body(&mut base, &snap);
+                    }
+                    let slide = (1.0 - fade) * scene.height();
+                    let sheet_rect =
+                        Rect::from_min_size(scene.min + vec2(0.0, slide), scene.size());
+                    let mut sheet = content.new_child(egui::UiBuilder::new().max_rect(sheet_rect));
+                    sheet.set_clip_rect(scene);
+                    sheet.painter().rect_filled(
+                        sheet_rect,
+                        CornerRadius {
+                            nw: 0,
+                            ne: 0,
+                            sw: SHEET_RADIUS,
+                            se: SHEET_RADIUS,
+                        },
+                        PALETTE.surface,
+                    );
+                    let outcome = self.settings_body(&mut sheet);
+                    close_settings = outcome.close;
+                    reset_size = outcome.reset_size;
+                    body_required = sheet.min_rect().height().max(scene.height());
+                } else {
+                    body_required = self.devices_body(&mut content, &snap);
+                    if fade > 0.001 {
+                        let slide = (1.0 - fade) * scene.height();
+                        let sheet_rect =
+                            Rect::from_min_size(scene.min + vec2(0.0, slide), scene.size());
+                        let mut sheet =
+                            content.new_child(egui::UiBuilder::new().max_rect(sheet_rect));
+                        sheet.set_clip_rect(scene);
+                        sheet.painter().rect_filled(
+                            sheet_rect,
+                            CornerRadius {
+                                nw: 0,
+                                ne: 0,
+                                sw: SHEET_RADIUS,
+                                se: SHEET_RADIUS,
+                            },
+                            PALETTE.surface,
+                        );
+                        self.settings_body(&mut sheet);
+                    }
+                }
+                (
+                    head,
+                    close_settings,
+                    reset_size,
+                    body_required,
+                    header_h,
+                    outer,
+                )
             });
 
-        // Repaint the 1px border last, inset into the card rect. The frame's own
-        // stroke is painted before the children, so the header/footer fills sit
-        // on top of its top and bottom runs; repainting here makes the border
-        // uniform on all four edges at every DPI.
-        let card_rect = card_response.response.rect.shrink(CARD_BLEED);
+        let (head, close_settings, reset_size, body_required, header_h, outer) =
+            card_response.inner;
+
+        // One border, painted after the content so it stays crisp over the
+        // header/footer fills; the shell fill was painted before the content.
         ui.painter().rect_stroke(
-            card_rect,
+            outer,
             CornerRadius::same(FLYOUT_RADIUS),
             Stroke::new(CARD_STROKE_WIDTH, border_card()),
             StrokeKind::Inside,
         );
-
-        let (head, close_settings, reset_size, scroll_delta) = card_response.inner.inner;
         if reset_size {
             self.manual_height = None;
             self.last_viewport_height = FLYOUT_DEFAULT_HEIGHT;
@@ -654,18 +668,19 @@ impl PiDaTrayApp {
             self.place(&ctx, height);
         }
 
-        // Natural height = current card height + how much the scroll content
-        // overflows (or underflows) its viewport. With a non-shrinking viewport
-        // this is independent of the current window height, so collapsing a
-        // card genuinely shrinks the flyout and expanding it grows again.
-        let card_h = card_response.inner.response.rect.height();
-        let natural_h = (card_h + scroll_delta).ceil().max(FLYOUT_MIN_HEIGHT);
+        // Natural height = the fixed shell's chrome + header + the body height
+        // the content actually needs. The shell itself never grows with content,
+        // so measure the body independently of the current window height.
+        let chrome = 2.0 * (CARD_BLEED + CARD_STROKE_WIDTH);
+        let natural_h = (chrome + header_h + body_required)
+            .ceil()
+            .max(FLYOUT_MIN_HEIGHT);
         let measured_h = self
             .manual_height
             .unwrap_or(natural_h)
             .clamp(FLYOUT_MIN_HEIGHT, self.max_height);
 
-        if (measured_h - self.last_viewport_height).abs() > 1.5 {
+        if (measured_h - self.last_viewport_height).abs() > 0.5 {
             // Views have different natural heights (settings is taller than a
             // few rows of tiles). Ease the window between them so switching
             // doesn't snap; the incoming content is revealed as it grows.

@@ -9,7 +9,7 @@ use eframe::egui::{
 
 use crate::{
     config::{normalize_server_url, set_autostart},
-    constants::{FLYOUT_RADIUS, FLYOUT_WIDTH, IDLE_POLL_CHOICES, PALETTE},
+    constants::{CARD_STROKE_WIDTH, FLYOUT_RADIUS, FLYOUT_WIDTH, IDLE_POLL_CHOICES, PALETTE},
     poller::{Command, Poller, Shared},
     theme::border_subtle,
 };
@@ -288,8 +288,8 @@ impl SettingsView {
             .corner_radius(CornerRadius {
                 nw: 0,
                 ne: 0,
-                sw: FLYOUT_RADIUS,
-                se: FLYOUT_RADIUS,
+                sw: FLYOUT_RADIUS - CARD_STROKE_WIDTH as u8,
+                se: FLYOUT_RADIUS - CARD_STROKE_WIDTH as u8,
             })
             .inner_margin(Margin::symmetric(12, 10))
             .show(ui, |ui| {

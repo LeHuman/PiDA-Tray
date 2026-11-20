@@ -7,7 +7,7 @@ use eframe::egui::{
 
 use super::icons;
 use crate::{
-    constants::{FLYOUT_RADIUS, FLYOUT_WIDTH, PALETTE},
+    constants::{CARD_STROKE_WIDTH, FLYOUT_RADIUS, FLYOUT_WIDTH, PALETTE},
     poller::{Connection, Snapshot},
     theme::{active_tint_bg, border_input, border_subtle, hover_overlay},
 };
@@ -116,8 +116,8 @@ pub fn show(ui: &mut Ui, snap: &Snapshot, in_settings: bool) -> HeaderOutput {
     let resp = Frame::new()
         .fill(PALETTE.surface_header)
         .corner_radius(CornerRadius {
-            nw: FLYOUT_RADIUS,
-            ne: FLYOUT_RADIUS,
+            nw: FLYOUT_RADIUS - CARD_STROKE_WIDTH as u8,
+            ne: FLYOUT_RADIUS - CARD_STROKE_WIDTH as u8,
             sw: 0,
             se: 0,
         })
