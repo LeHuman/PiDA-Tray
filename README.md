@@ -40,7 +40,7 @@ Desktop access to server-managed home automation devices should not require keep
 - Compact three-column grid of square device tiles. A single-toggle tile toggles from the whole card; a toggle+slider tile uses the whole card for tap-to-toggle and press/hold-or-drag to set the first slider, whose value fills the full cell from the bottom behind the disclosure strip. Every tile keeps its label and value on one shared bottom row.
 - Expanding a tile animates in place to the full-width card with every control, status value, and action; clicking outside animates it closed. Expanded cards also expose ↑/↓ device-reorder controls.
 - Reorder devices with the ↑/↓ controls in an expanded card. Order is saved by schema path, new devices append, and missing devices keep their slot and cached state so a transient schema omission does not lose their configuration.
-- Subtle synthesized UI ticks for toggles, actions, and expansion; can be disabled with **Settings → Subtle UI sounds**.
+- Subtle synthesized UI ticks for toggles, actions, and expansion; can be disabled with **Settings → UI sounds**.
 - Opening Settings slides the page up over the device grid and eases the flyout between its two heights; closing slides it back down.
 - The flyout auto-fits its content: one row of tiles (or the empty state) shrinks the window all the way down instead of leaving a fixed minimum height.
 - Taskbar-anchored dark flyout with focus-loss auto-hide, pin toggle, and optional Windows startup registration (`HKCU\...\Run`).

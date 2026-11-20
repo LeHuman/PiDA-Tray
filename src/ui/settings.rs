@@ -3,15 +3,15 @@
 use std::sync::Arc;
 
 use eframe::egui::{
-    self, Align, Color32, CornerRadius, FontId, Frame, Layout, Margin, Pos2, Rect, RichText,
-    Stroke, Ui, Vec2,
+    self, Align, Align2, Color32, CornerRadius, FontId, Frame, Layout, Margin, Pos2, Rect,
+    RichText, Role, Sense, Stroke, StrokeKind, Ui, Vec2, WidgetAtom, WidgetInfo,
 };
 
 use crate::{
     config::{normalize_server_url, set_autostart},
-    constants::{APP_VERSION, FLYOUT_WIDTH, IDLE_POLL_CHOICES, PALETTE, REPO_URL},
+    constants::{APP_NAME, APP_VERSION, FLYOUT_WIDTH, IDLE_POLL_CHOICES, PALETTE, REPO_URL},
     poller::{Command, Poller, Shared},
-    theme::border_subtle,
+    theme::{active_tint_bg, border_input, border_subtle, hover_overlay},
 };
 
 use super::{
@@ -227,7 +227,7 @@ impl SettingsView {
                         ui.horizontal(|ui| {
                             ui.set_width(FLYOUT_WIDTH - 44.0);
                             ui.label(
-                                RichText::new("Subtle UI sounds")
+                                RichText::new("UI sounds")
                                     .size(12.0)
                                     .color(PALETTE.on_surface),
                             );
@@ -308,27 +308,124 @@ impl SettingsView {
         }
 
         // Transparent frame: only lays out the footer now that the fill is
-        // painted above.
+        // painted above. Same compact height as the sibling tray app.
         Frame::new()
-            .inner_margin(Margin::symmetric(12, 12))
+            .inner_margin(Margin::symmetric(12, 10))
             .show(ui, |ui| {
                 ui.allocate_ui_with_layout(
-                    Vec2::new(FLYOUT_WIDTH - 24.0, 32.0),
+                    Vec2::new(FLYOUT_WIDTH - 24.0, 30.0),
                     Layout::left_to_right(Align::Center),
                     |ui| {
-                        // Version link on the bottom-left, matching the sibling
-                        // tray app: the version itself opens the repository.
-                        ui.scope(|ui| {
-                            ui.style_mut().visuals.hyperlink_color = PALETTE.focus;
-                            ui.hyperlink_to(
-                                RichText::new(format!("v{APP_VERSION}"))
-                                    .size(11.5)
-                                    .color(PALETTE.focus),
-                                REPO_URL,
+                        // Version badge: app name, separator, then the version
+                        // in the accent colour. The whole badge opens the repo.
+                        let mut version_job = egui::text::LayoutJob::default();
+                        version_job.append(
+                            APP_NAME,
+                            0.0,
+                            egui::TextFormat {
+                                font_id: FontId::proportional(11.5),
+                                color: Color32::PLACEHOLDER,
+                                valign: Align::Center,
+                                ..Default::default()
+                            },
+                        );
+                        version_job.append(
+                            " · ",
+                            0.0,
+                            egui::TextFormat {
+                                font_id: FontId::proportional(11.0),
+                                color: PALETTE.muted,
+                                valign: Align::Center,
+                                ..Default::default()
+                            },
+                        );
+                        version_job.append(
+                            &format!("v{APP_VERSION}"),
+                            0.0,
+                            egui::TextFormat {
+                                font_id: FontId::monospace(11.0),
+                                color: PALETTE.focus,
+                                valign: Align::Center,
+                                ..Default::default()
+                            },
+                        );
+
+                        let mut badge = WidgetAtom::new(egui::WidgetText::from(version_job))
+                            .sense(Sense::click())
+                            .frame(
+                                Frame::new()
+                                    .inner_margin(Margin::symmetric(8, 3))
+                                    .corner_radius(CornerRadius::same(6)),
                             )
-                            .on_hover_text(REPO_URL)
-                            .on_hover_cursor(egui::CursorIcon::PointingHand);
+                            .min_size(Vec2::new(0.0, 24.0))
+                            .align2(Align2::CENTER_CENTER)
+                            .allocate(ui);
+
+                        let hovered = badge.response.hovered();
+                        let pressed = badge.response.is_pointer_button_down_on();
+                        let focused = badge.response.has_focus();
+
+                        if hovered {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
+
+                        let (bg, stroke, fg) = if pressed {
+                            (
+                                active_tint_bg(),
+                                Stroke::new(1.0, PALETTE.focus.gamma_multiply(0.75)),
+                                Color32::WHITE,
+                            )
+                        } else if hovered {
+                            (
+                                PALETTE.surface_container.blend(hover_overlay()),
+                                Stroke::new(1.0, border_input()),
+                                Color32::WHITE,
+                            )
+                        } else {
+                            (
+                                PALETTE.surface,
+                                Stroke::new(1.0, border_subtle()),
+                                PALETTE.on_surface_variant,
+                            )
+                        };
+
+                        badge.container.frame.fill = bg;
+                        badge.container.fallback_text_color = fg;
+                        let painted = badge.paint(ui);
+
+                        ui.painter().rect_stroke(
+                            painted.response.rect,
+                            CornerRadius::same(6),
+                            stroke,
+                            StrokeKind::Inside,
+                        );
+                        if focused {
+                            ui.painter().rect_stroke(
+                                painted.response.rect,
+                                CornerRadius::same(6),
+                                Stroke::new(1.5, PALETTE.focus),
+                                StrokeKind::Inside,
+                            );
+                        }
+
+                        let link_label = format!("{APP_NAME} v{APP_VERSION}");
+                        painted.response.widget_info(|| {
+                            WidgetInfo::labeled(Role::Link, ui.is_enabled(), &link_label)
                         });
+                        if painted.response.clicked_with_open_in_background() {
+                            ui.open_url(egui::OpenUrl {
+                                url: REPO_URL.to_owned(),
+                                new_tab: true,
+                            });
+                        } else if painted.response.clicked() {
+                            ui.open_url(egui::OpenUrl {
+                                url: REPO_URL.to_owned(),
+                                new_tab: false,
+                            });
+                        }
+                        painted
+                            .response
+                            .on_hover_text("Open the PiDA Tray repository");
 
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             ui.spacing_mut().item_spacing = Vec2::new(8.0, 0.0);
@@ -336,7 +433,7 @@ impl SettingsView {
                             if pill_button(
                                 ui,
                                 RichText::new("Save").size(12.0).strong(),
-                                Vec2::new(66.0, 32.0),
+                                Vec2::new(66.0, 30.0),
                                 6,
                                 ButtonKind::Primary,
                             )
@@ -350,7 +447,7 @@ impl SettingsView {
                             if pill_button(
                                 ui,
                                 RichText::new("Cancel").size(12.0).strong(),
-                                Vec2::new(62.0, 32.0),
+                                Vec2::new(62.0, 30.0),
                                 6,
                                 ButtonKind::Ghost,
                             )
