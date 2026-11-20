@@ -12,7 +12,7 @@ use std::{
 };
 
 use eframe::egui::{
-    self, CornerRadius, Margin, RichText, Stroke, StrokeKind, ViewportCommand, vec2,
+    self, CornerRadius, Margin, RichText, Stroke, StrokeKind, Ui, ViewportCommand, vec2,
 };
 
 use crate::{
@@ -28,6 +28,8 @@ use crate::{
 };
 
 use button::{ButtonKind, pill_button};
+
+const VIEW_ANIMATION: f32 = 0.18;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
@@ -80,6 +82,10 @@ pub struct PiDaTrayApp {
 
     devices: devices::DevicesView,
     settings: settings::SettingsView,
+    /// Eased position between the devices grid (0.0) and settings (1.0).
+    view_mix: f32,
+    /// Window height when the current view transition started.
+    view_from_height: Option<f32>,
 }
 
 impl PiDaTrayApp {
@@ -143,6 +149,8 @@ impl PiDaTrayApp {
             painted_once: false,
             devices: Default::default(),
             settings: Default::default(),
+            view_mix: 0.0,
+            view_from_height: None,
         }
     }
 
@@ -207,6 +215,7 @@ impl PiDaTrayApp {
 
         self.visible = true;
         self.view = View::Devices;
+        self.view_mix = 0.0;
         self.shown_at = None;
         self.seen_focused_while_shown = false;
         self.shared.set_visible(true);
@@ -247,6 +256,7 @@ impl PiDaTrayApp {
         self.visible = false;
         self.reveal_phase = RevealPhase::Hidden;
         self.view = View::Devices;
+        self.view_mix = 0.0;
         self.settings.reset();
         self.shown_at = None;
         self.seen_focused_while_shown = false;
@@ -364,8 +374,112 @@ impl PiDaTrayApp {
 
     // -- drawing ---------------------------------------------------------------
 
+    /// Advances the devices↔settings page transition.
+    fn advance_view_mix(&mut self, ctx: &egui::Context) {
+        let target = if self.view == View::Settings {
+            1.0
+        } else {
+            0.0
+        };
+        if (self.view_mix - target).abs() <= f32::EPSILON {
+            self.view_from_height = None;
+            return;
+        }
+        if self.view_from_height.is_none() {
+            self.view_from_height = Some(self.last_viewport_height);
+        }
+        let dt = ctx.input(|i| i.stable_dt).min(0.05);
+        let step = dt / VIEW_ANIMATION;
+        self.view_mix = if self.view_mix < target {
+            (self.view_mix + step).min(target)
+        } else {
+            (self.view_mix - step).max(target)
+        };
+        ctx.request_repaint();
+    }
+
+    /// Device grid body; returns how far its scroll content overflows.
+    fn devices_body(&mut self, ui: &mut Ui, snap: &crate::poller::Snapshot) -> f32 {
+        let mut scroll_delta = 0.0;
+        egui::Frame::new()
+            .inner_margin(Margin::same(FLYOUT_PADDING as i8))
+            .show(ui, |ui| {
+                ui.set_width(FLYOUT_WIDTH - 2.0 * FLYOUT_PADDING);
+                ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+
+                if let Some(msg) = &snap.banner {
+                    let clicked = egui::Frame::new()
+                        .fill(PALETTE.error_surface)
+                        .corner_radius(CornerRadius::same(8))
+                        .stroke(Stroke::new(1.0, PALETTE.error))
+                        .inner_margin(Margin::symmetric(10, 6))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(msg).size(11.5).color(PALETTE.error),
+                                )
+                                .sense(egui::Sense::click()),
+                            )
+                            .on_hover_text("Click to dismiss")
+                            .clicked()
+                        })
+                        .inner;
+                    if clicked {
+                        self.shared.update(|s| s.banner = None);
+                    }
+                }
+
+                if snap.connection == Connection::Unconfigured {
+                    ui.label(
+                        RichText::new("No server configured").color(PALETTE.on_surface_variant),
+                    );
+                    if pill_button(
+                        ui,
+                        RichText::new("Configure Server URL").strong(),
+                        vec2(0.0, 32.0),
+                        6,
+                        ButtonKind::Primary,
+                    )
+                    .clicked()
+                    {
+                        self.view = View::Settings;
+                    }
+                } else {
+                    if snap.connection == Connection::Offline && !snap.catalog.is_empty() {
+                        ui.label(
+                            RichText::new("Offline — showing last known state")
+                                .color(PALETTE.warn)
+                                .size(11.0),
+                        );
+                    }
+                    let scroll_max = ui.available_height().max(120.0);
+                    let mut scroll = egui::ScrollArea::vertical()
+                        .max_height(scroll_max)
+                        .auto_shrink([false, false]);
+                    // The flyout height trails the animated reveal by a frame;
+                    // hide the scrollbar so it doesn't flash mid-expansion.
+                    if self.devices.is_animating() {
+                        scroll = scroll.scroll_bar_visibility(
+                            egui::containers::scroll_area::ScrollBarVisibility::AlwaysHidden,
+                        );
+                    }
+                    let scroll = scroll.show(ui, |ui| {
+                        self.devices.show(ui, snap, &self.shared, &self.poller)
+                    });
+                    scroll_delta = scroll.content_size.y - scroll.inner_rect.height();
+                }
+            });
+        scroll_delta
+    }
+
+    fn settings_body(&mut self, ui: &mut Ui) -> settings::SettingsOutcome {
+        self.settings.show(ui, &self.shared, &self.poller)
+    }
+
     fn draw(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        self.advance_view_mix(&ctx);
         let snap = self.shared.snapshot();
         let mut scroll_delta = 0.0f32;
 
@@ -390,96 +504,57 @@ impl PiDaTrayApp {
                         let mut close_settings = false;
                         let mut reset_size = false;
 
-                        match self.view {
-                            View::Settings => {
-                                let outcome = self.settings.show(ui, &self.shared, &self.poller);
-                                close_settings = outcome.close;
-                                reset_size = outcome.reset_size;
+                        // The settings sheet slides in from the right over the
+                        // device grid; closing slides it back out. The sheet
+                        // carries its own surface-coloured backdrop so the grid
+                        // never ghosts through the form.
+                        let settings_target = self.view == View::Settings;
+                        let fade = egui::emath::easing::cubic_out(self.view_mix);
+
+                        if settings_target {
+                            if fade < 0.999 {
+                                let rect = ui.available_rect_before_wrap();
+                                let mut base = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+                                base.set_clip_rect(rect);
+                                self.devices_body(&mut base, &snap);
                             }
-                            View::Devices => {
-                                egui::Frame::new()
-                                    .inner_margin(Margin::same(FLYOUT_PADDING as i8))
-                                    .show(ui, |ui| {
-                                        ui.set_width(FLYOUT_WIDTH - 2.0 * FLYOUT_PADDING);
-                                        ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
-
-                                        if let Some(msg) = &snap.banner {
-                                            let clicked = egui::Frame::new()
-                                                .fill(PALETTE.error_surface)
-                                                .corner_radius(CornerRadius::same(8))
-                                                .stroke(Stroke::new(1.0, PALETTE.error))
-                                                .inner_margin(Margin::symmetric(10, 6))
-                                                .show(ui, |ui| {
-                                                    ui.set_width(ui.available_width());
-                                                    ui.add(
-                                                        egui::Label::new(
-                                                            RichText::new(msg)
-                                                                .size(11.5)
-                                                                .color(PALETTE.error),
-                                                        )
-                                                        .sense(egui::Sense::click()),
-                                                    )
-                                                    .on_hover_text("Click to dismiss")
-                                                    .clicked()
-                                                })
-                                                .inner;
-                                            if clicked {
-                                                self.shared.update(|s| s.banner = None);
-                                            }
-                                        }
-
-                                        if snap.connection == Connection::Unconfigured {
-                                            ui.label(
-                                                RichText::new("No server configured")
-                                                    .color(PALETTE.on_surface_variant),
-                                            );
-                                            if pill_button(
-                                                ui,
-                                                RichText::new("Configure Server URL").strong(),
-                                                vec2(0.0, 32.0),
-                                                6,
-                                                ButtonKind::Primary,
-                                            )
-                                            .clicked()
-                                            {
-                                                self.view = View::Settings;
-                                            }
-                                        } else {
-                                            if snap.connection == Connection::Offline
-                                                && !snap.catalog.is_empty()
-                                            {
-                                                ui.label(
-                                                    RichText::new(
-                                                        "Offline — showing last known state",
-                                                    )
-                                                    .color(PALETTE.warn)
-                                                    .size(11.0),
-                                                );
-                                            }
-                                            let scroll_max = ui.available_height().max(120.0);
-                                            let mut scroll = egui::ScrollArea::vertical()
-                                                .max_height(scroll_max)
-                                                .auto_shrink([false, false]);
-                                            // The flyout height trails the animated
-                                            // reveal by a frame; hide the scrollbar so
-                                            // it doesn't flash mid-expansion.
-                                            if self.devices.is_animating() {
-                                                scroll = scroll.scroll_bar_visibility(
-                                                    egui::containers::scroll_area::ScrollBarVisibility::AlwaysHidden,
-                                                );
-                                            }
-                                            let scroll = scroll.show(ui, |ui| {
-                                                self.devices.show(
-                                                    ui,
-                                                    &snap,
-                                                    &self.shared,
-                                                    &self.poller,
-                                                )
-                                            });
-                                            scroll_delta =
-                                                scroll.content_size.y - scroll.inner_rect.height();
-                                        }
-                                    });
+                            let scene = ui.available_rect_before_wrap();
+                            let slide = (1.0 - fade) * scene.width();
+                            ui.scope(|ui| {
+                                ui.set_clip_rect(scene);
+                                ui.with_visual_transform(
+                                    egui::emath::TSTransform::from_translation(vec2(slide, 0.0)),
+                                    |ui| {
+                                        ui.painter().rect_filled(
+                                            ui.available_rect_before_wrap(),
+                                            0.0,
+                                            PALETTE.surface,
+                                        );
+                                        let outcome = self.settings_body(ui);
+                                        close_settings = outcome.close;
+                                        reset_size = outcome.reset_size;
+                                    },
+                                );
+                            });
+                        } else {
+                            let scene = ui.available_rect_before_wrap();
+                            scroll_delta = self.devices_body(ui, &snap);
+                            if fade > 0.001 {
+                                let slide = (1.0 - fade) * scene.width();
+                                let mut outgoing =
+                                    ui.new_child(egui::UiBuilder::new().max_rect(scene));
+                                outgoing.set_clip_rect(scene);
+                                outgoing.with_visual_transform(
+                                    egui::emath::TSTransform::from_translation(vec2(slide, 0.0)),
+                                    |ui| {
+                                        ui.painter().rect_filled(
+                                            ui.available_rect_before_wrap(),
+                                            0.0,
+                                            PALETTE.surface,
+                                        );
+                                        self.settings_body(ui);
+                                    },
+                                );
                             }
                         }
                         (head, close_settings, reset_size, scroll_delta)
@@ -572,14 +647,26 @@ impl PiDaTrayApp {
             .clamp(FLYOUT_MIN_HEIGHT, self.max_height);
 
         if (measured_h - self.last_viewport_height).abs() > 1.5 {
-            self.last_viewport_height = measured_h;
-            ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(
-                FLYOUT_OUTER_WIDTH,
-                measured_h,
-            )));
+            // Views have different natural heights (settings is taller than a
+            // few rows of tiles). Ease the window between them so switching
+            // doesn't snap; the incoming content is revealed as it grows.
+            let next = match self.view_from_height {
+                Some(from) if self.view_mix > 0.0 && self.view_mix < 1.0 => {
+                    let progress = if self.view == View::Settings {
+                        self.view_mix
+                    } else {
+                        1.0 - self.view_mix
+                    };
+                    let eased = egui::emath::easing::cubic_out(progress);
+                    from + (measured_h - from) * eased
+                }
+                _ => measured_h,
+            };
+            self.last_viewport_height = next;
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(FLYOUT_OUTER_WIDTH, next)));
             self.size_settle = 3;
             if self.reveal_phase == RevealPhase::Shown {
-                self.place(&ctx, measured_h);
+                self.place(&ctx, next);
             } else {
                 self.reveal_phase = RevealPhase::Settling;
             }

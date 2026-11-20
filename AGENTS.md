@@ -18,6 +18,7 @@ defaults, comments, tests, docs, or git history. Use placeholders: `http://192.0
 - Every successful dispatch starts the Android-style settle cascade (`schedule_settle`): refresh all group states at +0.5/1/3/8 s, last action wins.
 - Device cards are square tiles in a compact three-column grid. Tapping a tile toggles its primary switch (or runs a single action); press-hold or drag on a tile with a slider adjusts that slider, and the accent background fills the whole cell from the bottom. Labels and values share one bottom row. `has_more` adds the right disclosure strip. Expanded cards render full width, animate their reveal (`DevicesView::expanded_animated`), and animate closed on outside click.
 - Device order is saved by path in `Settings::device_order`; new paths append, and missing paths/state are retained so devices return to their slot after transient schema omissions or re-additions.
+- `PiDaTrayApp::view_mix` drives the settings transition: the settings sheet slides in over the grid with its own backdrop (`with_visual_transform`), and the flyout height eases from `view_from_height` to the incoming view's natural height instead of snapping.
 - UI sound effects go through `sound::play` only when `Settings::ui_sounds` is enabled.
 - Use `ui::button::pill_button` for custom buttons; do not use explicit `.fill()` on `egui::Button` or hover feedback is lost.
 - Device icons: a server PNG from `/api/icon/<endpoint>` always wins. The local fallback must stay generic and privacy-neutral — broad device-category terms only, never personal rooms/devices.
