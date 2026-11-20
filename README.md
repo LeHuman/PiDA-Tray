@@ -38,6 +38,7 @@ Desktop access to server-managed home automation devices should not require keep
 - Reorder devices with the ↑/↓ controls in an expanded card. Order is saved by schema path, new devices append, and missing devices keep their slot and cached state so a transient schema omission does not lose their configuration.
 - Subtle synthesized UI ticks for toggles, actions, and expansion; can be disabled with **Settings → Subtle UI sounds**.
 - Opening Settings slides the page up over the device grid and eases the flyout between its two heights; closing slides it back down.
+- The flyout auto-fits its content: one row of tiles (or the empty state) shrinks the window all the way down instead of leaving a fixed minimum height.
 - Taskbar-anchored dark flyout with focus-loss auto-hide, pin toggle, and optional Windows startup registration (`HKCU\...\Run`).
 - Mapped, pre-painted flyout with a one-tick reveal: no white flash or resize jump when opening, and no unpainted swap chain after hiding.
 
@@ -66,6 +67,18 @@ The compiled executable is written to `target/release/pida-tray.exe` (or downloa
 2. Left-click the tray icon to toggle the flyout, or right-click for the context menu (`Open / Hide Flyout`, `Refresh`, `Settings...`, `Quit PiDA Tray`).
 3. Open **Settings** and enter your server URL (for example `http://192.0.2.10:9999`), idle health check interval, and optional Windows startup toggle, then click **Save**.
 4. Settings (`settings.json`), cached schema/state (`cache.json`), and cached icons (`icons/`) are stored under `%APPDATA%\PiDA-Tray\`.
+
+### UI demo mode
+
+To exercise the flyout without a server, and without touching your saved settings, pass a device count:
+
+```sh
+pida-tray.exe --demo 1    # one row
+pida-tray.exe --demo 0    # empty state
+pida-tray.exe --demo 20   # long, scrollable list
+```
+
+`--demo` alone shows 8 devices; `PIDA_TRAY_DEMO=12` works too. The demo runs as a separate tray icon with a throwaway config in the temp directory, so the real instance and its server connection keep running untouched. Toggles and sliders update locally only.
 
 ## Security
 

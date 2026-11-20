@@ -18,8 +18,31 @@ use std::sync::Arc;
 
 use eframe::egui;
 
+/// `--demo N`, `--demo=N`, or `PIDA_TRAY_DEMO=N` starts an isolated instance
+/// with N synthetic devices and no network. Bare `--demo` uses 8.
+fn demo_count() -> Option<usize> {
+    if let Ok(value) = std::env::var("PIDA_TRAY_DEMO") {
+        return Some(value.trim().parse().unwrap_or(8));
+    }
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    for (i, arg) in args.iter().enumerate() {
+        if arg == "--demo" {
+            return Some(args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(8));
+        }
+        if let Some(rest) = arg.strip_prefix("--demo=") {
+            return Some(rest.parse().unwrap_or(8));
+        }
+    }
+    None
+}
+
 fn main() -> eframe::Result<()> {
-    let instance = single_instance::SingleInstance::new(constants::APP_ID)
+    let demo = demo_count();
+    let instance_id = match demo {
+        Some(_) => format!("{}.demo", constants::APP_ID),
+        None => constants::APP_ID.to_owned(),
+    };
+    let instance = single_instance::SingleInstance::new(&instance_id)
         .expect("failed to create single-instance lock");
     if !instance.is_single() {
         return Ok(());
@@ -33,9 +56,26 @@ fn main() -> eframe::Result<()> {
         .build()
         .expect("failed to start async runtime");
 
-    let shared = poller::Shared::new(config::app_dir());
+    let app_dir = match demo {
+        Some(_) => {
+            // Keep demo data away from the real profile and start fresh.
+            let dir = std::env::temp_dir().join("pida-tray-demo");
+            let _ = std::fs::remove_dir_all(&dir);
+            dir
+        }
+        None => config::app_dir(),
+    };
+    let shared = poller::Shared::new(app_dir);
     let (poller_handle, commands) = poller::Poller::new();
-    runtime.spawn(poller::run(shared.clone(), commands));
+    match demo {
+        Some(count) => {
+            poller::seed_demo(&shared, count);
+            runtime.spawn(poller::run_demo(shared.clone(), commands));
+        }
+        None => {
+            runtime.spawn(poller::run(shared.clone(), commands));
+        }
+    }
 
     let app_icon = egui::IconData {
         rgba: tray::render_icon_rgba(tray::StatusKey::Online),

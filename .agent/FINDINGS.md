@@ -38,7 +38,8 @@ Initial scaffold was created offline without a Rust toolchain. During ingestion,
 - **Settings footer**: Save/Cancel are pushed to the bottom of the card instead of floating under the form.
 - **Settings transition**: `App::view_mix` eases between the devices grid and settings; the settings sheet slides up from the bottom with an opaque backdrop and the flyout height lerps from the captured start height, so neither the content swap nor the size change snaps.
 - **Fixed panel height**: the flyout no longer derives its window height from the `ScrollArea` measurement (inside a live window that returns the window height, letting it shrink once and never grow). It uses a stable 720 pt default, a 260–900 pt range, and the user's dragged height when present.
-- **Resizable, monitor-aware flyout**: the window is resizable vertically (width locked), caps at the monitor work area, remembers a user drag in `settings.json`, and offers **Reset flyout size** in Settings.
+- **Resizable, monitor-aware flyout**: the window is resizable vertically (width locked), caps at the monitor work area, remembers a user drag in `settings.json`, and offers **Reset flyout size** in Settings. Auto-fit no longer has a 260 pt floor: `FLYOUT_MIN_HEIGHT` is a 72 pt sanity floor, so a single row or the empty state fits exactly.
+- **UI demo mode**: `pida-tray.exe --demo N` (or `PIDA_TRAY_DEMO=N`) seeds N synthetic devices in memory, uses a separate instance id and temp app dir, and runs a no-network command loop for testing tile counts and transitions.
 - **Mapped-window reveal fix**: hiding with `ViewportCommand::Visible(false)` left eframe 0.37 with a blank swap chain on the next show. The window now stays mapped, is parked at `-32000,-32000`, and is DWM-cloaked while hidden (`main::set_window_cloaked`); show uncloaks and repositions it.
 
 ## Ported PiGradient tray UI fixes

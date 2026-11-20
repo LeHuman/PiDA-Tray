@@ -19,7 +19,10 @@ pub const CARD_STROKE_WIDTH: f32 = 1.0;
 /// land exactly on the swap-chain edge.
 pub const CARD_BLEED: f32 = 1.0;
 pub const FLYOUT_OUTER_WIDTH: f32 = FLYOUT_WIDTH + 2.0 * CARD_STROKE_WIDTH + 2.0 * CARD_BLEED;
-pub const FLYOUT_MIN_HEIGHT: f32 = 260.0;
+/// Smallest flyout the window manager will allow. The auto-fit height is
+/// content-driven; this is only a sanity floor so a bug can't produce a
+/// degenerate window.
+pub const FLYOUT_MIN_HEIGHT: f32 = 72.0;
 /// Initial panel height; users can drag the flyout edge to change it.
 pub const FLYOUT_DEFAULT_HEIGHT: f32 = 720.0;
 /// Upper bound; the actual cap is also clamped to the monitor work area.

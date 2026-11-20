@@ -532,6 +532,88 @@ pub async fn run(shared: Arc<Shared>, mut rx: mpsc::UnboundedReceiver<Command>) 
     }
 }
 
+/// Fill shared state with `count` synthetic devices for `--demo` runs.
+///
+/// Runs entirely in memory: no server URL, no cache writes, and no network.
+/// Toggle/slider edits are optimistic and the demo task clears their in-flight
+/// locks so the UI never sticks in a busy state.
+pub fn seed_demo(shared: &Shared, count: usize) {
+    let mut groups = Map::new();
+    for i in 1..=count {
+        let path = format!("demo/device{i}");
+        let actions = match i % 3 {
+            0 => serde_json::json!({
+                "toggle": {},
+                "set": {
+                    "params": {"on": {"type": "bool"}},
+                    "inputs": ["on"],
+                    "outputs": ["on"]
+                }
+            }),
+            1 => serde_json::json!({
+                "set": {
+                    "params": {"brightness": {"type": "int", "min": 0, "max": 100}},
+                    "inputs": ["brightness"],
+                    "outputs": ["brightness"]
+                }
+            }),
+            _ => serde_json::json!({
+                "toggle": {},
+                "set": {
+                    "params": {
+                        "on": {"type": "bool"},
+                        "brightness": {"type": "int", "min": 0, "max": 100}
+                    },
+                    "inputs": ["on", "brightness"],
+                    "outputs": ["on", "brightness"]
+                }
+            }),
+        };
+        groups.insert(path, serde_json::json!({ "actions": actions }));
+    }
+
+    let schema = Schema::from_value(&serde_json::json!({ "groups": groups }))
+        .expect("synthetic demo schema must parse");
+    let catalog = build_catalog(&schema);
+    let mut states = BTreeMap::new();
+    for group in &catalog {
+        let mut state = Map::new();
+        if group
+            .set
+            .as_ref()
+            .is_some_and(|set| set.toggle_param.is_some())
+        {
+            state.insert("on".into(), serde_json::json!(true));
+        }
+        if group.set.as_ref().is_some_and(|set| {
+            set.range_params
+                .iter()
+                .any(|param| param.name == "brightness")
+        }) {
+            state.insert("brightness".into(), serde_json::json!(40));
+        }
+        states.insert(group.path.clone(), state);
+    }
+
+    shared.update(|s| {
+        s.catalog = Arc::new(catalog);
+        s.states = states;
+        s.connection = Connection::Online;
+        s.syncing = false;
+        s.settings.server_url = "http://demo.local:9999".into();
+    });
+}
+
+/// Command loop for `--demo`: acknowledges dispatches locally, no network.
+pub async fn run_demo(shared: Arc<Shared>, mut rx: mpsc::UnboundedReceiver<Command>) {
+    while let Some(command) = rx.recv().await {
+        match command {
+            Command::Dispatch(req) => shared.update(|s| dec_in_flight(s, &req)),
+            _ => shared.update(|s| s.syncing = false),
+        }
+    }
+}
+
 fn start_sync(client: &Option<PidaClient>, shared: &Arc<Shared>) {
     match client {
         Some(c) => {
